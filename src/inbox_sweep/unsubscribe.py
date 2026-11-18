@@ -114,7 +114,7 @@ def run(cands: list[dict], log_path: str | Path, opener=None, progress=None) -> 
     results = {"ok": 0, "failed": 0, "manual": 0}
     log_path = Path(log_path)
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    with log_path.open("a") as fh:
+    with log_path.open("a", encoding="utf-8") as fh:
         for c in cands:
             if c["method"] != "one-click":
                 results["manual"] += 1

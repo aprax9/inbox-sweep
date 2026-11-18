@@ -71,13 +71,28 @@ MESSAGE_COLUMNS = [
 ]
 
 
+SCHEMA_VERSION = 1
+
+
+class StoreError(RuntimeError):
+    pass
+
+
 class Store:
     def __init__(self, path: str | Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(self.path)
         self.conn.row_factory = sqlite3.Row
+        version = self.conn.execute("PRAGMA user_version").fetchone()[0]
+        if version > SCHEMA_VERSION:
+            self.conn.close()
+            raise StoreError(f"{self.path} was written by a newer inbox-sweep (schema {version}). Upgrade first.")
         self.conn.executescript(SCHEMA)
+        if version < SCHEMA_VERSION:
+            # Future migrations go here, one step per version.
+            self.conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            self.conn.commit()
 
     def close(self) -> None:
         self.conn.close()
@@ -108,6 +123,22 @@ class Store:
 
     def known_ids(self) -> set[str]:
         return {r[0] for r in self.conn.execute("SELECT id FROM messages")}
+
+    def labels_by_id(self) -> dict[str, list[str]]:
+        return {r[0]: json.loads(r[1] or "[]") for r in self.conn.execute("SELECT id, labels FROM messages")}
+
+    def update_labels(self, pairs: Iterable[tuple[str, list[str]]]) -> int:
+        rows = [(json.dumps(labels), mid) for mid, labels in pairs]
+        with self.conn:
+            self.conn.executemany("UPDATE messages SET labels = ? WHERE id = ?", rows)
+        return len(rows)
+
+    def delete_messages(self, ids: Iterable[str]) -> int:
+        rows = [(i,) for i in ids]
+        with self.conn:
+            self.conn.executemany("DELETE FROM messages WHERE id = ?", rows)
+            self.conn.executemany("DELETE FROM decisions WHERE message_id = ?", rows)
+        return len(rows)
 
     def clear_messages(self) -> None:
         with self.conn:

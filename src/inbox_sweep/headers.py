@@ -35,14 +35,28 @@ PERSONAL_DOMAINS = frozenset({
     "att.net", "btinternet.com", "orange.fr", "free.fr", "t-online.de",
 })
 
+# Machine-sender words, matched as whole tokens anywhere in the local part, so
+# "calendar-notification@", "e_alert@" and "billing.noreply@" all count.
 NOREPLY_RE = re.compile(
-    r"^(no[-_.]?reply|do[-_.]?not[-_.]?reply|donotreply|notifications?|notify|alerts?|"
-    r"mailer[-_]daemon|postmaster|bounces?|newsletters?|news|info|marketing|"
+    r"(^|[-_.+])("
+    r"no[-_.]?reply|do[-_.]?not[-_.]?reply|donotreply|notifications?|notify|alerts?|"
+    r"mailer[-_]daemon|mailer|postmaster|bounces?|newsletters?|news|info|marketing|"
     r"promo(tions)?|offers|deals|updates?|digest|hello|team|support|service|"
     r"billing|receipts?|orders?|bookings?|reservations?|accounts?|security|"
     r"membership|members|rewards|feedback|surveys?|events?|careers|jobs|"
-    r"recruiting|talent|automated|system|admin)([-_.+].*)?$",
+    r"recruiting|talent|automated|system|admin|"
+    r"ne[-_.]?pas[-_.]?repondre|nicht[-_.]?antworten|no[-_.]?responder|nao[-_.]?responda|non[-_.]?rispondere"
+    r")([-_.+]|$)",
     re.IGNORECASE,
+)
+
+# Government and tax-authority senders: labels like .gov/.gouv/.gob anywhere in
+# the domain, plus well-known authorities that don't use them.
+GOV_LABELS = {"gov", "gouv", "gob", "govt", "gub", "mil", "gc"}
+GOV_SUFFIXES = (
+    "canada.ca", "europa.eu", "admin.ch", "bund.de", "elster.de", "go.jp", "go.kr", "go.th", "go.id",
+    "gv.at", "gov.uk", "nic.in", "gov.au", "govt.nz", "ird.gov.hk", "service.gov.uk", "skatteverket.se",
+    "belastingdienst.nl", "agenziaentrate.it", "agenciatributaria.es", "finanzamt.de",
 )
 
 BULK_PRECEDENCE = {"bulk", "list", "junk"}
@@ -107,7 +121,14 @@ def is_bulk(msg: Message) -> bool:
 
 def is_noreply_address(email: str) -> bool:
     local = email.split("@", 1)[0]
-    return bool(NOREPLY_RE.match(local))
+    return bool(NOREPLY_RE.search(local))
+
+
+def is_government(email_or_domain: str) -> bool:
+    domain = email_or_domain.rsplit("@", 1)[-1].lower().strip(".")
+    if any(label in GOV_LABELS for label in domain.split(".")):
+        return True
+    return any(domain == s or domain.endswith("." + s) for s in GOV_SUFFIXES)
 
 
 def is_machine(msg: Message) -> bool:

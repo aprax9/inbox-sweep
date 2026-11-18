@@ -6,7 +6,7 @@
     {
       "name": "inbox-sweep",
       "source": "./",
-      "description": "Clean a decades-old inbox down to what's worth keeping for 20 years, via the Gmail API, IMAP, or the Gmail web UI."
+      "description": "Clean a decades-old inbox down to what's worth keeping for 20 years, via Gmail, Outlook, any IMAP server, or the Gmail web UI. Rules run locally; nothing is deleted permanently."
     }
   ]
 }

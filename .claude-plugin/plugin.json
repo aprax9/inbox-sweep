@@ -1,6 +1,6 @@
 {
   "name": "inbox-sweep",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Clean a decades-old inbox down to what's worth keeping for 20 years: protect-first, trash-only, review before anything moves. Works through the Gmail API, Microsoft Graph (Outlook), IMAP, or by driving Gmail in a browser.",
   "author": { "name": "The inbox-sweep authors" },
   "license": "MIT",

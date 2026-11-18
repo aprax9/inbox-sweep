@@ -24,7 +24,7 @@ from inbox_sweep.headers import domain_matches, is_bulk, is_machine, is_personal
 from inbox_sweep.model import SENT, STARRED, Decision, Message
 
 DAY = 86400
-AI_CATEGORIES = {"other_automated", "human_unknown"}
+AI_CATEGORIES = {"other_automated", "human_unknown", "cold_outreach"}
 
 
 @dataclass
@@ -65,8 +65,12 @@ def _name_hit(text: str, words: list[str]) -> str:
     return ""
 
 
-def protection(msg: Message, cfg: Config, ctx: Context, now: int) -> tuple[str, str]:
-    """Return (level, reason) where level is "absolute", "soft" or ""."""
+def protection(msg: Message, cfg: Config, ctx: Context, now: int, category: str = "") -> tuple[str, str]:
+    """Return (level, reason) where level is "absolute", "soft" or "".
+
+    `category` only matters for one rule: scam-like subjects ("You won!") don't get
+    the personal-address protection, since spam is often sent from webmail.
+    """
     sender = msg.from_email
     if msg.from_email in ctx.me:
         return "absolute", "sent by you"
@@ -93,7 +97,8 @@ def protection(msg: Message, cfg: Config, ctx: Context, now: int) -> tuple[str, 
                 return "soft", "someone you've written to"
             if cfg.protect_domains and domain_matches(sender, cfg.protect_domains):
                 return "soft", "protected domain (a person, not a mailing)"
-            if not is_machine(msg) and is_personal_domain(msg.from_domain, ctx.personal_domains):
+            if (category != "spam_like" and not is_machine(msg)
+                    and is_personal_domain(msg.from_domain, ctx.personal_domains)):
                 return "soft", "a person on a personal address"
         hit = _name_hit(msg.subject + " " + msg.from_name, cfg.protect_keywords)
         if hit and not bulk:
@@ -120,7 +125,7 @@ def classify(messages: list[Message], cfg: Config, *, overrides: dict[str, str] 
 
     for msg in messages:
         category = categorize(msg)
-        level, why = protection(msg, cfg, ctx, now)
+        level, why = protection(msg, cfg, ctx, now, category)
         override = _override_for(msg.from_email, overrides)
 
         def decide(action: str, reason: str, prot: str = "") -> None:

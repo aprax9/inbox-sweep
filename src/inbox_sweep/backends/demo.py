@@ -15,7 +15,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Iterator
 
-from inbox_sweep.backends.base import Backend, Progress
+from inbox_sweep.backends.base import Backend, LiveProtection, Progress
 from inbox_sweep.model import (
     CATEGORY_PROMOTIONS,
     CATEGORY_SOCIAL,
@@ -193,25 +193,52 @@ class DemoBackend(Backend):
             self._save(generate_mailbox(me))
 
     def _load(self) -> list[Message]:
-        data = json.loads(self.path.read_text())
+        data = json.loads(self.path.read_text(encoding="utf-8"))
         return [Message(**m) for m in data["messages"]]
 
     def _save(self, messages: list[Message]) -> None:
         payload = {"account": self.me, "messages": [asdict(m) for m in messages]}
-        self.path.write_text(json.dumps(payload, indent=1))
+        self.path.write_text(json.dumps(payload, indent=1), encoding="utf-8")
 
     def account(self) -> str:
         return self.me
 
-    def iter_messages(self, query=None, limit=None, progress: Progress = None) -> Iterator[Message]:
+    def iter_messages(self, query=None, limit=None, progress: Progress = None,
+                      include_trash: bool = False) -> Iterator[Message]:
         count = 0
         for msg in self._load():
-            if TRASH in msg.labels:
+            if TRASH in msg.labels and not include_trash:
                 continue
             yield msg
             count += 1
             if limit and count >= limit:
                 return
+
+    def protected_thread_ids(self, protect: LiveProtection) -> set[str] | None:
+        out = set()
+        wanted_labels = {l.lower() for l in protect.labels}
+        for m in self._load():
+            if TRASH in m.labels:
+                continue
+            if ((protect.starred and STARRED in m.labels)
+                    or (protect.sent and (SENT in m.labels or m.from_email in protect.me))
+                    or any(l.lower() in wanted_labels for l in m.labels)
+                    or m.from_email in protect.people or any(a in protect.people for a in m.to + m.cc)):
+                out.add(m.thread_id)
+        return out
+
+    # Test helpers: simulate changes made in the mail app after indexing.
+    def set_labels(self, message_id: str, add: list[str] = (), remove: list[str] = ()) -> None:
+        msgs = self._load()
+        for m in msgs:
+            if m.id == message_id:
+                m.labels = sorted((set(m.labels) | set(add)) - set(remove))
+        self._save(msgs)
+
+    def add_message(self, msg: Message) -> None:
+        msgs = self._load()
+        msgs.append(msg)
+        self._save(msgs)
 
     def label_messages(self, messages, label, progress: Progress = None) -> None:
         wanted = {m.id for m in messages}

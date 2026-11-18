@@ -32,10 +32,10 @@ def test_gmail_metadata_to_message():
             {"name": "List-Unsubscribe-Post", "value": "List-Unsubscribe=One-Click"},
         ]},
     }
-    m = message_from_gmail(data, {"Label_7": "Family"}, {"18a"})
+    m = message_from_gmail(data, {"Label_7": "Family"})
     assert m.from_email == "jane@example.org" and m.from_name == "Jane Doe"
     assert m.labels == ["INBOX", "STARRED", "Family"]
-    assert m.date == 1426000000 and m.has_attachment
+    assert m.date == 1426000000 and m.snippet == ""  # body snippet never stored
     assert m.to == ["me@example.com", "b@x.org"]
 
 

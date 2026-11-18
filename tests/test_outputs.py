@@ -29,7 +29,7 @@ from conftest import NOW, make
 def test_review_page_escapes_hostile_subjects(tmp_path, cfg):
     evil = make(sender="x@evil.example", subject="</script><script>alert(1)</script>", days_ago=900)
     data = build_review_data([evil], classify([evil], cfg, now=NOW), {}, "me@example.com")
-    html = write_review(tmp_path / "r.html", data).read_text()
+    html = write_review(tmp_path / "r.html", data).read_text(encoding="utf-8")
     payload = html.split('id="data">', 1)[1].split("</script>", 1)[0]
     assert "<script>" not in payload and "\\u003c/script\\u003e" in payload
     assert json.loads(payload)["senders"][0]["subjects"] == ["</script><script>alert(1)</script>"]
@@ -178,6 +178,22 @@ def test_ai_refusal_and_unknown_ids_are_ignored():
 def test_example_config_matches_template_and_loads():
     from pathlib import Path
     example = Path(__file__).resolve().parent.parent / "sweep.example.toml"
-    assert example.read_text() == CONFIG_TEMPLATE
+    assert example.read_text(encoding="utf-8") == CONFIG_TEMPLATE
     cfg = load_config(example)
     assert cfg.me == ["you@example.com"] and cfg.retention["documents"] == -1
+
+
+def test_versions_agree():
+    import json
+    from pathlib import Path
+
+    import inbox_sweep
+
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # Python 3.10
+        import tomli as tomllib
+    root = Path(__file__).resolve().parent.parent
+    project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+    plugin = json.loads((root / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))["version"]
+    assert project == inbox_sweep.__version__ == plugin

@@ -11,6 +11,13 @@ type = "gmail"          # gmail | outlook | imap | demo
 credentials = "~/.config/inbox-sweep/credentials.json"   # Gmail OAuth client (see docs/gmail-api-setup.md)
 token = "~/.config/inbox-sweep/token.json"
 
+[gmail]
+# Google cut API quotas for projects created on or after 1 May 2026 ("2026").
+# Older projects keep higher limits ("legacy"). Indexing a big inbox is much faster
+# over IMAP; trashing is fast either way.
+quota = "2026"
+fast_trash = true       # 1,000 messages per call, verified on the first batch
+
 [outlook]
 # Outlook.com / Hotmail / Microsoft 365 via Microsoft Graph (see docs/outlook-setup.md)
 client_id = ""          # your Entra app registration's Application (client) ID
@@ -21,6 +28,9 @@ token = "~/.config/inbox-sweep/outlook-token.json"
 host = "imap.gmail.com"
 port = 993
 user = "you@example.com"
+tls = "ssl"             # "ssl", "starttls", or "none" (only to this machine, e.g. a local bridge)
+verify = true           # false only for a local bridge with a self-signed certificate
+ca_file = ""            # extra CA certificate, e.g. Proton Mail Bridge's exported cert
 # Password is read from INBOX_SWEEP_IMAP_PASSWORD, or prompted. Use an app password.
 
 [privacy]
@@ -58,6 +68,8 @@ job_automated = 0
 newsletter = 0
 promotion = 0
 social = 0
+spam_like = 0
+cold_outreach = 365
 other_automated = 90
 human_unknown = -1
 
@@ -77,8 +89,10 @@ batch_size = 40
 min_messages = 1
 
 [apply]
-keep_label = "Keep"     # applied to everything kept, so you can audit in your mail app
+keep_label = "Keep"     # added to everything kept, to audit in your mail app. It does not
+                        # protect mail on later runs: star it or use [protect] labels
 batch_size = 50
+max_index_age_days = 7  # refuse plans built from an older index (0 = no limit)
 
 [paths]
 data_dir = ".inbox-sweep"

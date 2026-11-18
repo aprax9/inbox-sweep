@@ -1,8 +1,14 @@
 """Freeze decisions into a plan, check it, apply it, and undo it.
 
-A plan is a JSON file listing exactly which threads go to Trash. Applying works
-from that frozen list (never from a live search), writes a log line per batch so
-an interrupted run resumes where it stopped, and the same log drives `undo`.
+A plan is a JSON file listing exactly which threads go to Trash. Applying:
+
+1. refuses plans for another account, or built from a stale index;
+2. re-checks the *live* mailbox for anything protected since indexing (newly
+   starred, newly replied to, newly labelled) and skips those threads;
+3. labels kept mail, then trashes in batches, writing each batch to the undo log
+   *before* it is sent ("pending") and again after it succeeds ("done"), so a
+   crash at any point leaves a log that `undo` can fully reverse and `apply`
+   can resume from.
 """
 
 from __future__ import annotations
@@ -14,10 +20,10 @@ from collections import Counter
 from pathlib import Path
 from typing import Callable
 
-from inbox_sweep.backends.base import Backend, chunked
+from inbox_sweep.backends.base import Backend, LiveProtection, chunked
 from inbox_sweep.classify import build_context, protection
 from inbox_sweep.config import Config
-from inbox_sweep.model import Decision, Message
+from inbox_sweep.model import TRASH, Decision, Message
 
 TRASH_RETENTION_DAYS = 30  # Gmail empties Trash after 30 days; most hosts are similar
 
@@ -27,20 +33,24 @@ class PlanError(RuntimeError):
 
 
 def _ref(m: Message, uidvalidity: dict[str, str]) -> dict:
-    uv = m.id.split("|")[1] if m.id.count("|") == 2 else uidvalidity.get(m.folder, "")
+    uv = ""
+    if m.folder and m.id.startswith(m.folder + "|"):
+        uv = m.id[len(m.folder) + 1:].split("|", 1)[0]  # "folder|uidvalidity|uid"
+    uv = uv or uidvalidity.get(m.folder, "")
     return {"id": m.id, "folder": m.folder, "uid": m.uid, "uidvalidity": uv,
             "message_id_header": m.message_id_header}
 
 
 def build_plan(messages: list[Message], decisions: list[Decision], cfg: Config, *,
-               account: str = "", backend: str = "", uidvalidity: dict[str, str] | None = None) -> dict:
+               account: str = "", backend: str = "", uidvalidity: dict[str, str] | None = None,
+               indexed_at: int | None = None) -> dict:
     uidvalidity = uidvalidity or {}
     by_id = {m.id: m for m in messages}
     threads: dict[str, list[tuple[Message, Decision]]] = {}
     keep_ids = []
     for d in decisions:
         m = by_id.get(d.message_id)
-        if not m:
+        if not m or TRASH in m.labels:  # mail already in Trash (indexed for `eval`) is never planned
             continue
         if d.action == "keep":
             keep_ids.append(m.id)
@@ -64,6 +74,7 @@ def build_plan(messages: list[Message], decisions: list[Decision], cfg: Config, 
     return {
         "version": 1,
         "created": int(time.time()),
+        "indexed_at": indexed_at,
         "account": account,
         "backend": backend,
         "keep_label": cfg.keep_label,
@@ -83,14 +94,22 @@ def build_plan(messages: list[Message], decisions: list[Decision], cfg: Config, 
 def save_plan(plan: dict, path: str | Path) -> Path:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(plan, indent=1, ensure_ascii=False))
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(plan, indent=1, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(path)  # atomic: a crash never leaves half a plan
     return path
 
 
 def load_plan(path: str | Path) -> dict:
-    plan = json.loads(Path(path).read_text())
-    if plan.get("version") != 1 or "trash" not in plan:
+    try:
+        plan = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise PlanError(f"Can't read plan {path}: {exc}") from exc
+    if not isinstance(plan, dict) or plan.get("version") != 1 or not isinstance(plan.get("trash"), list):
         raise PlanError(f"{path} is not an inbox-sweep plan")
+    for entry in plan["trash"]:
+        if not isinstance(entry, dict) or "thread_id" not in entry or not isinstance(entry.get("messages"), list):
+            raise PlanError(f"{path} has a malformed entry")
     return plan
 
 
@@ -99,7 +118,8 @@ def verify_plan(plan: dict, messages: list[Message], decisions: list[Decision], 
     """Independent safety check. Returns human-readable problems; empty means safe.
 
     Re-derives absolute protections from the index and refuses any plan that
-    would trash protected mail or split a thread that has kept messages.
+    would trash protected mail, split a thread that has kept messages, or touch
+    messages the index doesn't know.
     """
     now = int(now or time.time())
     ctx = build_context(messages, cfg)
@@ -108,11 +128,14 @@ def verify_plan(plan: dict, messages: list[Message], decisions: list[Decision], 
     problems = []
     for entry in plan["trash"]:
         if entry["thread_id"] in kept_threads:
-            problems.append(f"thread {entry['thread_id']} ({entry['subject']!r}) also has kept messages")
+            problems.append(f"thread {entry['thread_id']} ({entry.get('subject', '')!r}) also has kept messages")
         for ref in entry["messages"]:
-            m = by_id.get(ref["id"])
+            m = by_id.get(ref.get("id"))
             if m is None:
+                problems.append(f"message {ref.get('id')} is not in the index (re-run `inbox-sweep plan`)")
                 continue
+            if m.thread_id != entry["thread_id"]:
+                problems.append(f"message {m.id} belongs to another thread")
             level, why = protection(m, cfg, ctx, now)
             if level == "absolute":
                 problems.append(f"{m.from_email} {m.subject!r}: {why}")
@@ -123,18 +146,58 @@ def log_path_for(plan: dict, cfg: Config) -> Path:
     return cfg.data_path / f"trash-log-{plan['fingerprint'][:10]}.jsonl"
 
 
-def _read_log(path: Path) -> list[dict]:
+def read_log(path: Path) -> dict[str, dict]:
+    """Thread id -> {"phase": "pending"|"done", "messages": [...]}; later lines win.
+
+    A torn last line (crash mid-write) is ignored.
+    """
+    out: dict[str, dict] = {}
     if not path.exists():
-        return []
-    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+        return out
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        if not line.strip():
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        tid = rec.get("thread_id")
+        if not tid:
+            continue
+        phase = rec.get("phase", "done")  # v0.1 logs only had done lines
+        if out.get(tid, {}).get("phase") == "done" and phase == "pending":
+            continue
+        out[tid] = {"phase": phase, "messages": rec.get("messages", [])}
+    return out
+
+
+def live_protection(cfg: Config, messages: list[Message]) -> LiveProtection:
+    """Exactly the absolute protections classify uses, asked of the live mailbox.
+
+    The keep label is deliberately not one of them: it is an audit trail of what an
+    earlier run kept, and honouring it would stop retention rules from ever
+    trashing mail on a later run. Star mail, or list a label under [protect]
+    labels, to protect it.
+    """
+    ctx = build_context(messages, cfg)
+    return LiveProtection(me=sorted(ctx.me), people=cfg.protect_people, labels=list(cfg.protect_labels),
+                          starred=cfg.protect_starred, sent=cfg.protect_replied_threads)
 
 
 def apply_plan(plan: dict, backend: Backend, cfg: Config, messages: list[Message], *,
-               label_keep: bool = True, progress: Callable[[str], None] | None = None) -> dict:
+               label_keep: bool = True, live_check: bool = True, allow_stale: bool = False,
+               progress: Callable[[str], None] | None = None, now: float | None = None) -> dict:
     say = progress or (lambda _m: None)
+    now = now or time.time()
     account = backend.account()
     if plan.get("account") and account and plan["account"].lower() != account.lower():
         raise PlanError(f"Plan is for {plan['account']} but the backend is signed in as {account}")
+    indexed_at = plan.get("indexed_at")
+    max_age = cfg.max_index_age_days * 86400
+    if indexed_at and max_age and now - indexed_at > max_age and not allow_stale:
+        days = int((now - indexed_at) / 86400)
+        raise PlanError(f"This plan was built from an index {days} days old. Run `inbox-sweep index` "
+                        "(incremental, fast), `classify` and `plan` again, or pass --allow-stale.")
 
     if label_keep and plan.get("keep_label") and backend.supports_labels:
         keep_ids = set(plan.get("keep_message_ids", []))
@@ -144,31 +207,54 @@ def apply_plan(plan: dict, backend: Backend, cfg: Config, messages: list[Message
 
     log = log_path_for(plan, cfg)
     log.parent.mkdir(parents=True, exist_ok=True)
-    done = {e["thread_id"] for e in _read_log(log)}
+    state = read_log(log)
+    done = {tid for tid, rec in state.items() if rec["phase"] == "done"}
     todo = [e for e in plan["trash"] if e["thread_id"] not in done]
     if done:
         say(f"Resuming: {len(done)} threads already in Trash")
+
+    skipped: list[str] = []
+    if live_check and todo:
+        protected_now = backend.protected_thread_ids(live_protection(cfg, messages))
+        if protected_now is None:
+            say("This backend can't re-check the live mailbox; relying on the index")
+        else:
+            skipped = [e["thread_id"] for e in todo if e["thread_id"] in protected_now]
+            if skipped:
+                say(f"Skipping {len(skipped)} threads protected since indexing (starred, replied to or labelled)")
+            todo = [e for e in todo if e["thread_id"] not in protected_now]
+
     trashed = 0
     failed = 0
-    with log.open("a") as fh:
+    with log.open("a", encoding="utf-8") as fh:
         for batch in chunked(todo, cfg.apply_batch_size):
+            for entry in batch:  # intent first: undo can reverse a crash mid-batch
+                fh.write(json.dumps({"phase": "pending", "thread_id": entry["thread_id"],
+                                     "messages": entry["messages"], "at": int(time.time())}) + "\n")
+            fh.flush()
             ok = set(backend.trash(batch, progress=say))
             for entry in batch:
                 if entry["thread_id"] in ok:
-                    fh.write(json.dumps({"thread_id": entry["thread_id"], "messages": entry["messages"],
-                                         "at": int(time.time())}) + "\n")
+                    fh.write(json.dumps({"phase": "done", "thread_id": entry["thread_id"],
+                                         "messages": entry["messages"], "at": int(time.time())}) + "\n")
                     trashed += 1
                 else:
                     failed += 1
             fh.flush()
             say(f"Trashed {len(done) + trashed}/{len(plan['trash'])} threads")
-    return {"trashed": trashed, "already": len(done), "failed": failed, "log": str(log),
-            "recoverable_until": time.strftime("%Y-%m-%d", time.localtime(time.time() + TRASH_RETENTION_DAYS * 86400))}
+    return {"trashed": trashed, "already": len(done), "failed": failed, "skipped_protected": len(skipped),
+            "log": str(log),
+            "recoverable_until": time.strftime("%Y-%m-%d", time.localtime(now + TRASH_RETENTION_DAYS * 86400))}
 
 
 def undo(log: str | Path, backend: Backend, cfg: Config, progress: Callable[[str], None] | None = None) -> dict:
+    """Restore every thread in the log, including ones a crash left as pending."""
     say = progress or (lambda _m: None)
-    entries = _read_log(Path(log))
+    path = Path(log)
+    if not path.exists():
+        raise PlanError(f"No such log: {path}")
+    state = read_log(path)
+    entries = [{"thread_id": tid, "messages": rec["messages"]} for tid, rec in state.items()]
     restored = 0
     for batch in chunked(entries, cfg.apply_batch_size):
         restored += len(backend.restore(batch, progress=say))

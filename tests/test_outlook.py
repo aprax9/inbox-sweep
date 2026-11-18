@@ -37,6 +37,7 @@ class FakeGraph:
         self.calls = []
         self.throttle_once = throttle_once
         self.categories_patched = {}
+        self.searches = []
 
     def __call__(self, method, url, headers, body):
         self.calls.append((method, url))
@@ -54,11 +55,16 @@ class FakeGraph:
             ]}
         if path == "/me/mailFolders/F-TAX/childFolders":
             return 200, {}, {"value": [{"id": "F-TAX-2015", "displayName": "2015", "childFolderCount": 0}]}
+        if path.startswith("/me/mailFolders/") and path.endswith("/messages"):
+            fid = unquote(path.split("/")[3])
+            return 200, {}, {"value": [m for m in self._matching(query) if m["parentFolderId"] == fid]}
         if path.startswith("/me/mailFolders/"):
             name = path.rsplit("/", 1)[1]
             if name in FOLDERS:
                 return 200, {}, {"id": FOLDERS[name]}
             return 404, {}, {"error": {"message": "not found"}}
+        if path == "/me/messages" and ("$filter" in query or "$search" in query):
+            return 200, {}, {"value": self._matching(query)}
         if path == "/me/messages":
             if "$select" in query:  # first page; later pages follow nextLink as-is
                 assert "bodyPreview" not in query["$select"][0] and "body" not in query["$select"][0].split(",")
@@ -72,6 +78,26 @@ class FakeGraph:
                 return 429, {"retry-after": "0"}, {}
             return 200, {}, {"responses": [self._sub(r) for r in json.loads(body)["requests"]]}
         raise AssertionError(f"unexpected {method} {url}")
+
+    def _matching(self, query):
+        items = sorted(self.messages.values(), key=lambda m: m["id"])
+        flt = query.get("$filter", [""])[0]
+        if flt == "flag/flagStatus eq 'flagged'":
+            items = [m for m in items if m["flag"]["flagStatus"] == "flagged"]
+        elif flt.startswith("categories/any(c:c eq '"):
+            cat = flt[len("categories/any(c:c eq '"):-2].replace("''", "'")
+            items = [m for m in items if cat in m["categories"]]
+        elif flt:
+            raise AssertionError(flt)
+        search = query.get("$search", [""])[0].strip('"').lower()
+        if search:
+            field, who = search.split(":", 1)
+            def addrs(m):
+                people = [m["from"]] + (m["toRecipients"] if field == "participants" else [])
+                return [p["emailAddress"]["address"].lower() for p in people]
+            items = [m for m in items if who in addrs(m)]
+        self.searches.append((flt, search))
+        return items
 
     def _sub(self, r):
         path = unquote(urlsplit(r["url"]).path)
@@ -142,3 +168,46 @@ def test_trash_restore_and_keep_label_roundtrip():
 def test_requires_client_id():
     with pytest.raises(BackendError):
         OutlookBackend(client_id="")
+
+
+def test_live_protection_queries():
+    me = {"emailAddress": {"address": "me@example.com"}}
+    fake = FakeGraph([
+        graph_message("flag", flag={"flagStatus": "flagged"}),
+        graph_message("sent", folder="F-SENT"),
+        graph_message("filed-mine", folder="F-ARCH", **{"from": me}),
+        graph_message("taxfolder", folder="F-TAX"),
+        graph_message("taxcat", categories=["Taxes"]),
+        graph_message("mom", **{"from": {"emailAddress": {"address": "mom@family.example"}}}),
+        graph_message("to-mom", toRecipients=[{"emailAddress": {"address": "mom@family.example"}}]),
+        graph_message("promo"),
+    ])
+    from inbox_sweep.backends.base import LiveProtection
+    threads = backend_for(fake).protected_thread_ids(
+        LiveProtection(me=["me@example.com"], people=["mom@family.example"], labels=["Taxes"]))
+    assert threads == {"c-conv-" + x for x in ("flag", "sent", "filed-mine", "taxfolder", "taxcat", "mom", "to-mom")}
+
+
+def test_include_trash_marks_deleted_items():
+    from inbox_sweep.model import TRASH
+    fake = FakeGraph([graph_message("A"), graph_message("B", folder="F-DEL"), graph_message("C", folder="F-JUNK")])
+    msgs = {m.id: m for m in backend_for(fake).iter_messages(include_trash=True)}
+    assert set(msgs) == {"A", "B"} and TRASH in msgs["B"].labels and TRASH not in msgs["A"].labels
+
+
+def test_batches_are_paced_per_sub_request():
+    clock = {"t": 0.0}
+
+    def sleep(s):
+        clock["t"] += s
+
+    fake = FakeGraph([graph_message(f"M{i:03d}") for i in range(100)])
+    client = GraphClient(lambda: "TOKEN", transport=fake, sleep=sleep, clock=lambda: clock["t"],
+                         requests_per_second=15)
+    backend = OutlookBackend(client=client)
+    entries = [{"thread_id": f"c-conv-M{i:03d}", "messages": [{"id": f"M{i:03d}", "folder": "F-INBOX"}]}
+               for i in range(100)]
+    assert len(backend.trash(entries)) == 100
+    # 100 moves in 5 batches of 20, each counted as 20 requests: Graph's 10,000 per 10 minutes is per
+    # sub-request. The first batch goes at once, the rest wait for budget.
+    assert clock["t"] >= (100 - 20) / 15 - 1e-9

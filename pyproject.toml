@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "inbox-sweep"
-version = "0.2.0"
+version = "0.3.0"
 description = "Clean a decades-old inbox down to what you'd want in 20 years. Trash-only, protect-first, review before anything moves."
 readme = "README.md"
 license = "MIT"
@@ -32,7 +32,7 @@ gmail = [
 outlook = ["msal>=1.28"]
 ai = ["anthropic>=2.0"]
 all = ["inbox-sweep[gmail,outlook,ai]"]
-dev = ["pytest>=8", "inbox-sweep[all]"]
+dev = ["pytest>=8", "hypothesis>=6", "inbox-sweep[all]"]
 
 [project.scripts]
 inbox-sweep = "inbox_sweep.cli:main"

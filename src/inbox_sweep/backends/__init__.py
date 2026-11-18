@@ -21,7 +21,8 @@ def get_backend(cfg: Config, kind: str | None = None, interactive: bool = True) 
             raise BackendError(
                 "The Gmail backend needs extra packages: pip install 'inbox-sweep[gmail]'"
             ) from exc
-        return GmailBackend(cfg.credentials, cfg.token, interactive=interactive)
+        return GmailBackend(cfg.credentials, cfg.token, interactive=interactive,
+                            quota=cfg.gmail_quota, fast_trash=cfg.gmail_fast_trash)
     if kind == "outlook":
         from inbox_sweep.backends.outlook import OutlookBackend
         return OutlookBackend(cfg.outlook_client_id, cfg.outlook_authority, cfg.outlook_token,
@@ -35,7 +36,8 @@ def get_backend(cfg: Config, kind: str | None = None, interactive: bool = True) 
             if not interactive:
                 raise BackendError("Set INBOX_SWEEP_IMAP_PASSWORD")
             password = getpass.getpass(f"IMAP app password for {cfg.imap_user}: ")
-        return ImapBackend(cfg.imap_host, cfg.imap_port, cfg.imap_user, password)
+        return ImapBackend(cfg.imap_host, cfg.imap_port, cfg.imap_user, password,
+                           tls=cfg.imap_tls, verify=cfg.imap_verify, ca_file=cfg.imap_ca_file)
     raise BackendError(f"Unknown backend '{kind}'. Use gmail, outlook, imap or demo.")
 
 

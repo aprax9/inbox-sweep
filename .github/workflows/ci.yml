@@ -2,19 +2,30 @@ name: CI
 
 on:
   push:
-    branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   test:
-    runs-on: ubuntu-latest
+    name: test (${{ matrix.os }}, py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest]
         python-version: ["3.10", "3.11", "3.12", "3.13"]
+        include:
+          - os: macos-latest
+            python-version: "3.12"
+          - os: windows-latest
+            python-version: "3.12"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -24,12 +35,89 @@ jobs:
         run: python -m pip install -e ".[dev]"
       - name: Test
         run: python -m pytest -q
+      - name: Accuracy gate (labeled corpus, zero false trash)
+        run: inbox-sweep eval --corpus --max-false-trash 0
       - name: Demo smoke test
         run: |
           cd "$(mktemp -d)"
           inbox-sweep demo --dir d
           inbox-sweep --config d/sweep.toml apply d/plan.json --yes
           inbox-sweep --config d/sweep.toml undo d/trash-log-*.jsonl --yes
+
+  imap-e2e:
+    name: IMAP end to end (real Dovecot server)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Start Dovecot on 127.0.0.1:143
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq dovecot-imapd > /dev/null
+          sudo systemctl stop dovecot || true
+          mkdir -p /tmp/mail
+          echo 'me@ci.test:{PLAIN}secret' | sudo tee /etc/dovecot/ci-users > /dev/null
+          sudo tee /etc/dovecot/dovecot.conf > /dev/null <<EOF
+          protocols = imap
+          listen = 127.0.0.1
+          ssl = no
+          disable_plaintext_auth = no
+          auth_mechanisms = plain login
+          mail_location = maildir:/tmp/mail/%u
+          log_path = /tmp/dovecot.log
+          passdb {
+            driver = passwd-file
+            args = scheme=PLAIN username_format=%u /etc/dovecot/ci-users
+          }
+          userdb {
+            driver = static
+            args = uid=$(id -u) gid=$(id -g) home=/tmp/mail/%u
+          }
+          namespace inbox {
+            inbox = yes
+            separator = /
+            mailbox Sent {
+              special_use = \Sent
+              auto = create
+            }
+            mailbox Trash {
+              special_use = \Trash
+              auto = create
+            }
+            mailbox Drafts {
+              special_use = \Drafts
+              auto = create
+            }
+            mailbox Junk {
+              special_use = \Junk
+              auto = create
+            }
+          }
+          EOF
+          sudo doveconf -n > /dev/null
+          sudo systemctl start dovecot
+          for i in 1 2 3 4 5 6 7 8 9 10; do nc -z 127.0.0.1 143 && break; sleep 1; done
+      - name: Install
+        run: python -m pip install -e .
+      - name: index, classify, plan, apply, undo against the server
+        run: python scripts/ci_imap_e2e.py --host 127.0.0.1 --port 143 --user me@ci.test --password secret
+      - name: Dovecot log
+        if: failure()
+        run: sudo cat /tmp/dovecot.log || true
+
+  benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: python -m pip install -e .
+      - name: 100,000 messages through the local pipeline
+        run: python scripts/benchmark.py --messages 100000 --max-seconds 120
 
   manifests:
     runs-on: ubuntu-latest
@@ -41,3 +129,8 @@ jobs:
           python -m json.tool .claude-plugin/marketplace.json > /dev/null
       - name: Browser helpers parse
         run: node --check skills/inbox-sweep/browser/gmail-helpers.js
+      - name: Package builds
+        run: |
+          python -m pip install -q build twine
+          python -m build
+          python -m twine check dist/*

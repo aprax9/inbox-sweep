@@ -25,9 +25,9 @@ from pathlib import Path
 from typing import Callable, Iterator
 from urllib.parse import quote, urlencode
 
-from inbox_sweep.backends.base import Backend, BackendError, Progress, chunked
+from inbox_sweep.backends.base import Backend, BackendError, LiveProtection, Pacer, Progress, chunked
 from inbox_sweep.headers import decode
-from inbox_sweep.model import INBOX, SENT, STARRED, Message
+from inbox_sweep.model import INBOX, SENT, STARRED, TRASH, Message
 
 GRAPH = "https://graph.microsoft.com/v1.0"
 SCOPES = ["Mail.ReadWrite", "User.Read"]
@@ -39,6 +39,10 @@ SELECT = ",".join([
 WELL_KNOWN = ["inbox", "sentitems", "deleteditems", "junkemail", "drafts", "outbox", "conversationhistory", "archive"]
 SKIP_WELL_KNOWN = {"deleteditems", "junkemail", "drafts", "outbox", "conversationhistory"}
 BATCH_SIZE = 20  # Graph's JSON batching limit
+PAGE_SIZE = 1000  # Graph's maximum $top for messages
+# Outlook allows 10,000 requests per 10 minutes per app and mailbox, and batched
+# sub-requests count individually. Pace at 15/s to stay under it.
+REQUESTS_PER_SECOND = 15
 MAX_ATTEMPTS = 6
 RETRYABLE = {429, 500, 502, 503, 504}
 
@@ -78,10 +82,12 @@ class GraphClient:
     """Minimal Graph client: JSON requests, paging, $batch, and throttling retries."""
 
     def __init__(self, token: Callable[[], str], transport: Transport | None = None,
-                 sleep: Callable[[float], None] = time.sleep):
+                 sleep: Callable[[float], None] = time.sleep, clock: Callable[[], float] = time.monotonic,
+                 requests_per_second: float = REQUESTS_PER_SECOND):
         self.token = token
         self.transport = transport or urllib_transport
         self.sleep = sleep
+        self.pacer = Pacer(requests_per_second, clock=clock, sleep=sleep)
 
     def _headers(self) -> dict:
         return {
@@ -91,12 +97,14 @@ class GraphClient:
             "Prefer": 'IdType="ImmutableId"',
         }
 
-    def request(self, method: str, path: str, params: dict | None = None, body: dict | None = None) -> dict:
+    def request(self, method: str, path: str, params: dict | None = None, body: dict | None = None,
+                cost: int = 1) -> dict:
         url = path if path.startswith("http") else GRAPH + path
         if params:
             url += ("&" if "?" in url else "?") + urlencode(params, safe="$,", quote_via=quote)
         payload = json.dumps(body).encode() if body is not None else None
         for attempt in range(MAX_ATTEMPTS):
+            self.pacer.spend(cost)
             status, headers, data = self.transport(method, url, self._headers(), payload)
             if status in RETRYABLE and attempt < MAX_ATTEMPTS - 1:
                 self.sleep(_retry_after(headers, attempt))
@@ -132,7 +140,7 @@ class GraphClient:
                         sub["body"] = r["body"]
                         sub["headers"] = {"Content-Type": "application/json"}
                     subs.append(sub)
-                data = self.request("POST", "/$batch", body={"requests": subs})
+                data = self.request("POST", "/$batch", body={"requests": subs}, cost=len(subs))
                 by_id = {r["id"]: r for r in group}
                 for resp in data.get("responses", []):
                     status = int(resp.get("status", 0))
@@ -173,6 +181,8 @@ def message_from_graph(data: dict, folder_names: dict[str, str], well_known: dic
         labels.append(INBOX)
     elif parent and parent == well_known.get("sentitems"):
         labels.append(SENT)
+    elif parent and parent == well_known.get("deleteditems"):
+        labels.append(TRASH)
     elif parent in folder_names:
         labels.append(folder_names[parent])  # folders act as labels, e.g. for [protect] labels
     labels += list(data.get("categories") or [])
@@ -207,14 +217,14 @@ def _msal_token_provider(client_id: str, authority: str, token_path: Path, inter
         raise BackendError("The Outlook backend needs: pip install 'inbox-sweep[outlook]'") from exc
     cache = msal.SerializableTokenCache()
     if token_path.exists():
-        cache.deserialize(token_path.read_text())
+        cache.deserialize(token_path.read_text(encoding="utf-8"))
     tenant = authority if authority.startswith("https://") else f"https://login.microsoftonline.com/{authority}"
     app = msal.PublicClientApplication(client_id, authority=tenant, token_cache=cache)
 
     def save() -> None:
         if cache.has_state_changed:
             token_path.parent.mkdir(parents=True, exist_ok=True)
-            token_path.write_text(cache.serialize())
+            token_path.write_text(cache.serialize(), encoding="utf-8")
             os.chmod(token_path, 0o600)
 
     def token() -> str:
@@ -277,23 +287,51 @@ class OutlookBackend(Backend):
         me = self.client.request("GET", "/me", {"$select": "mail,userPrincipalName"})
         return (me.get("mail") or me.get("userPrincipalName") or "").lower()
 
-    def iter_messages(self, query=None, limit=None, progress: Progress = None) -> Iterator[Message]:
+    def iter_messages(self, query=None, limit=None, progress: Progress = None,
+                      include_trash: bool = False) -> Iterator[Message]:
         self._load_folders()
         say = progress or (lambda _m: None)
-        skip = {self._well_known[n] for n in SKIP_WELL_KNOWN if n in self._well_known}
-        params = {"$select": SELECT, "$top": "250"}
+        skip_names = SKIP_WELL_KNOWN - ({"deleteditems"} if include_trash else set())
+        skip = {self._well_known[n] for n in skip_names if n in self._well_known}
+        params = {"$select": SELECT, "$top": str(PAGE_SIZE)}
         if query:
             params["$search"] = '"' + query.replace('"', "") + '"'
         count = 0
+        started = time.monotonic()
         for item in self.client.pages("/me/messages", params):
             if item.get("isDraft") or item.get("parentFolderId") in skip:
                 continue
             yield message_from_graph(item, self._folders or {}, self._well_known)
             count += 1
             if count % 1000 == 0:
-                say(f"read {count}")
+                say(f"read {count} ({count / max(time.monotonic() - started, 1e-9):.0f}/s)")
             if limit and count >= limit:
                 return
+
+    def _conversations(self, path: str, params: dict | None = None) -> set[str]:
+        params = {"$select": "conversationId", "$top": str(PAGE_SIZE), **(params or {})}
+        return {"c-" + m["conversationId"] for m in self.client.pages(path, params) if m.get("conversationId")}
+
+    def protected_thread_ids(self, protect: LiveProtection) -> set[str] | None:
+        self._load_folders()
+        threads: set[str] = set()
+        if protect.starred:
+            threads |= self._conversations("/me/messages", {"$filter": "flag/flagStatus eq 'flagged'"})
+        if protect.sent and "sentitems" in self._well_known:
+            threads |= self._conversations(f"/me/mailFolders/{quote(self._well_known['sentitems'], safe='')}/messages")
+        names = {v.lower(): k for k, v in (self._folders or {}).items()}
+        for label in protect.labels:
+            folder_id = names.get(label.lower())
+            if folder_id:
+                threads |= self._conversations(f"/me/mailFolders/{quote(folder_id, safe='')}/messages")
+            escaped = label.replace("'", "''")
+            threads |= self._conversations("/me/messages", {"$filter": f"categories/any(c:c eq '{escaped}')"})
+        for person in protect.people:
+            threads |= self._conversations("/me/messages", {"$search": f'"participants:{person}"'})
+        if protect.sent:  # your own mail filed outside Sent Items
+            for me in protect.me:
+                threads |= self._conversations("/me/messages", {"$search": f'"from:{me}"'})
+        return threads
 
     def label_messages(self, messages, label, progress: Progress = None) -> None:
         ids = [m.id for m in messages]

@@ -9,13 +9,13 @@ from __future__ import annotations
 
 import re
 
-from inbox_sweep.headers import is_bulk, is_machine
+from inbox_sweep.headers import is_bulk, is_government, is_machine
 from inbox_sweep.model import CATEGORY_PROMOTIONS, CATEGORY_SOCIAL, Message
 
 CATEGORIES = [
     "documents", "person_payment", "job_process", "receipt", "booking", "security",
     "reminder", "account_notice", "job_automated", "newsletter", "promotion", "social",
-    "other_automated", "human_unknown",
+    "spam_like", "cold_outreach", "other_automated", "human_unknown",
 ]
 
 CATEGORY_HELP = {
@@ -31,6 +31,8 @@ CATEGORY_HELP = {
     "newsletter": "Mailing lists and newsletters",
     "promotion": "Marketing and sales",
     "social": "Social network notifications",
+    "spam_like": "Prize, lottery and inheritance scams that got past the spam filter",
+    "cold_outreach": "Sales and recruiting pitches from people you never wrote to",
     "other_automated": "Other machine-sent mail",
     "human_unknown": "Written by a person you never wrote to",
 }
@@ -51,7 +53,25 @@ DOCUMENTS = re.compile(
     r"class action|settlement (notice|claim|payment)|consumer claim|court (date|notice|order)|legal notice|"
     r"pay ?slip|pay stub|salary statement|record of employment|"
     r"vaccin(e|ation) (certificate|record)|immuni[sz]ation record|medical record|"
-    r"(birth|marriage|death) certificate",
+    r"(birth|marriage|death) certificate|"
+    # A few non-English equivalents (tax, payslip, visa, residence permit).
+    r"steuer(bescheid|erklärung|bescheinigung)|lohnabrechnung|gehaltsabrechnung|aufenthaltstitel|"
+    r"imp[ôo]ts?\b|avis d'imposition|bulletin de (paie|salaire)|fiche de paie|titre de s[ée]jour|"
+    r"impuesto|declaraci[óo]n de la renta|n[óo]mina|permiso de residencia|"
+    r"belasting|aangifte|loonstrook|skatt|deklaration|"
+    r"[税稅]|[签簽]证|[签簽]證|在留|給与明細|源泉徴収|納税",
+    _I,
+)
+SPAMMY = re.compile(
+    r"you('ve| have)? won|winner|lottery|jackpot|inheritance|beneficiary|claim your (prize|reward|funds)|"
+    r"million (dollars|usd|euros)|western union|wire transfer fee|bitcoin (giveaway|investment)|"
+    r"urgent (reply|response) (needed|required)|dear (friend|beneficiary)|reply for details",
+    _I,
+)
+COLD_OUTREACH = re.compile(
+    r"opportunit(y|ies) for you|exciting (opportunity|role)|following up|circling back|quick question|"
+    r"touch base|partnership|collaborat(e|ion) (opportunity|with you)|book a (demo|call)|"
+    r"(are you|is your team) (open|interested)|would you be interested|introduc(e|ing) (myself|our)",
     _I,
 )
 ESIGN_SENDER = re.compile(r"docusign|hellosign|dropboxsign|adobesign|echosign|eversign|pandadoc|signnow|esign", _I)
@@ -136,6 +156,10 @@ def categorize(msg: Message) -> str:
             return "person_payment"
     if SECURITY.search(subject):
         return "security"
+    if not bulk and is_government(sender):
+        return "documents"  # tax, immigration and benefits mail, in any language
+    if SPAMMY.search(subject):
+        return "spam_like"
     if not bulk and JOB_PROCESS.search(subject):
         return "job_process"
     if JOB_AUTOMATED.search(subject) or (ATS_SENDER.search(sender) and is_machine(msg)):
@@ -157,4 +181,6 @@ def categorize(msg: Message) -> str:
         return "newsletter"
     if is_machine(msg):
         return "other_automated"
+    if COLD_OUTREACH.search(subject):
+        return "cold_outreach"
     return "human_unknown"
