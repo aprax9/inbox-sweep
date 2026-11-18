@@ -36,9 +36,6 @@ review page and writes a plan. Then try `apply`, and `undo`.
 
 ## Why it's built this way
 
-It came out of cleaning a real 20-year Gmail inbox by hand-driving the web
-interface. That took three rounds and hours. These choices fix what went wrong:
-
 - **Decide locally, act once.** Headers go into a local SQLite file, so changing
   a rule costs seconds, not another hour of Gmail searches.
 - **Protect people, not institutions.** Hand-written domain lists missed a school
