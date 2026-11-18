@@ -42,15 +42,26 @@ CONFIG_TEMPLATE = """\
 me = ["you@example.com"]
 
 [backend]
-type = "gmail"          # gmail | imap | demo
+type = "gmail"          # gmail | outlook | imap | demo
 credentials = "~/.config/inbox-sweep/credentials.json"   # Gmail OAuth client (see docs/gmail-api-setup.md)
 token = "~/.config/inbox-sweep/token.json"
+
+[outlook]
+# Outlook.com / Hotmail / Microsoft 365 via Microsoft Graph (see docs/outlook-setup.md)
+client_id = ""          # your Entra app registration's Application (client) ID
+authority = "common"    # "common", "consumers" (personal accounts only) or your tenant id
+token = "~/.config/inbox-sweep/outlook-token.json"
 
 [imap]
 host = "imap.gmail.com"
 port = 993
 user = "you@example.com"
 # Password is read from INBOX_SWEEP_IMAP_PASSWORD, or prompted. Use an app password.
+
+[privacy]
+# true: the CLI prints only counts, never senders or subjects. Use this when an AI
+# agent runs the commands, so no mail data reaches its provider. Same as --private.
+private = false
 
 [protect]
 # Never trashed, whatever their content.
@@ -86,10 +97,17 @@ other_automated = 90
 human_unknown = -1
 
 [ai]
-# Optional: classify ambiguous senders with Claude (pip install 'inbox-sweep[ai]').
-# Only sender names, addresses, counts and subject lines are sent. Never bodies.
+# Optional: ask a language model about senders the rules can't place.
+# Only sender names, addresses, counts and subject lines are used. Never bodies.
+#   provider = "local"             any OpenAI-compatible server on this machine (Ollama,
+#                                  LM Studio, llama.cpp, vLLM). Refuses non-local URLs.
+#   provider = "openai-compatible" the same protocol at any URL: data goes to that provider
+#   provider = "anthropic"         Claude (pip install 'inbox-sweep[ai]'): data goes to Anthropic
 enabled = false
-model = "claude-opus-5-5"
+provider = "local"
+model = ""              # blank = provider default (local: llama3.1:8b, anthropic: claude-opus-5-5)
+base_url = "http://localhost:11434/v1"   # Ollama's default; LM Studio uses http://localhost:1234/v1
+api_key_env = ""        # name of an environment variable holding the key, if the server needs one
 batch_size = 40
 min_messages = 1
 
@@ -111,6 +129,10 @@ class Config:
     imap_host: str = "imap.gmail.com"
     imap_port: int = 993
     imap_user: str = ""
+    outlook_client_id: str = ""
+    outlook_authority: str = "common"
+    outlook_token: str = "~/.config/inbox-sweep/outlook-token.json"
+    private: bool = False
     protect_people: list[str] = field(default_factory=list)
     protect_domains: list[str] = field(default_factory=list)
     protect_keywords: list[str] = field(default_factory=list)
@@ -123,7 +145,10 @@ class Config:
     never_protect: list[str] = field(default_factory=list)
     retention: dict[str, int] = field(default_factory=lambda: dict(DEFAULT_RETENTION))
     ai_enabled: bool = False
-    ai_model: str = "claude-opus-5-5"
+    ai_provider: str = "local"
+    ai_model: str = ""
+    ai_base_url: str = "http://localhost:11434/v1"
+    ai_api_key_env: str = ""
     ai_batch_size: int = 40
     ai_min_messages: int = 1
     keep_label: str = "Keep"
@@ -176,6 +201,13 @@ def load_config(path: str | Path | None) -> Config:
     cfg.imap_port = int(imap.get("port", cfg.imap_port))
     cfg.imap_user = imap.get("user", cfg.imap_user)
 
+    outlook = data.get("outlook", {})
+    cfg.outlook_client_id = outlook.get("client_id", cfg.outlook_client_id).strip()
+    cfg.outlook_authority = outlook.get("authority", cfg.outlook_authority).strip() or "common"
+    cfg.outlook_token = outlook.get("token", cfg.outlook_token)
+
+    cfg.private = bool(data.get("privacy", {}).get("private", False))
+
     protect = data.get("protect", {})
     cfg.protect_people = _list(protect, "people")
     cfg.protect_domains = _list(protect, "domains")
@@ -200,7 +232,12 @@ def load_config(path: str | Path | None) -> Config:
 
     ai = data.get("ai", {})
     cfg.ai_enabled = bool(ai.get("enabled", False))
+    cfg.ai_provider = ai.get("provider", cfg.ai_provider)
+    if cfg.ai_provider not in ("local", "openai-compatible", "anthropic"):
+        raise ConfigError("ai.provider must be 'local', 'openai-compatible' or 'anthropic'")
     cfg.ai_model = ai.get("model", cfg.ai_model)
+    cfg.ai_base_url = ai.get("base_url", cfg.ai_base_url)
+    cfg.ai_api_key_env = ai.get("api_key_env", cfg.ai_api_key_env)
     cfg.ai_batch_size = int(ai.get("batch_size", cfg.ai_batch_size))
     cfg.ai_min_messages = int(ai.get("min_messages", cfg.ai_min_messages))
 

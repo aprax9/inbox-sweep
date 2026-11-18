@@ -16,9 +16,11 @@ inbox-sweep demo --open   # see your change on the synthetic mailbox
 
 ## Good first contributions
 
-- **A Microsoft Graph backend** (Outlook.com / Microsoft 365). Implement the five
-  methods in `backends/base.py`. Model it on `gmail_api.py`.
-- **A JMAP backend** (Fastmail's native API).
+- **A new mail provider.** Implement the five methods in `backends/base.py`, model
+  it on `backends/outlook.py` (HTTP API) or `backends/imap.py`, and test it
+  against a fake server like `tests/test_outlook.py` does. JMAP (Fastmail's
+  native API) is a good candidate.
+- **Browser mode for Outlook on the web**, mirroring the Gmail playbook.
 - **Category patterns for other languages** in `categories.py`, with tests.
 - **Browser-mode selectors.** If Gmail changes its DOM, update `gmail-helpers.js`
   and note the date in the header comment.

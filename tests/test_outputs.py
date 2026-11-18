@@ -3,7 +3,18 @@
 import json
 from types import SimpleNamespace
 
-from inbox_sweep.ai import build_groups, parse_response, run_ai
+import pytest
+
+from inbox_sweep.ai import (
+    AnthropicClassifier,
+    OpenAICompatibleClassifier,
+    build_groups,
+    describe_egress,
+    is_local_url,
+    make_classifier,
+    parse_response,
+    run_ai,
+)
 from inbox_sweep.classify import classify
 from inbox_sweep.config import CONFIG_TEMPLATE, load_config
 from inbox_sweep.model import CATEGORY_PROMOTIONS
@@ -112,15 +123,48 @@ def test_ai_groups_only_ambiguous_and_caches(tmp_path, cfg):
 
     store = Store(cfg.db_path)
     client = FakeClient({"pat@vendor.example": "trash"})
-    assert run_ai(store, cfg, msgs, decisions, client=client) == 1
+    classifier = AnthropicClassifier("claude-opus-5-5", client=client)
+    assert run_ai(store, cfg, msgs, decisions, classifier=classifier) == 1
     req = client.requests[0]
     assert req["model"] == "claude-opus-5-5" and req["fallbacks"] == "default"
     assert req["output_config"]["format"]["type"] == "json_schema"
     assert "Following up" in req["messages"][0]["content"]  # subjects, never bodies
     assert store.ai_decisions()["pat@vendor.example"]["action"] == "trash"
     # Second run: cached, nothing re-sent.
-    assert run_ai(store, cfg, msgs, decisions, client=client) == 0
+    assert run_ai(store, cfg, msgs, decisions, classifier=classifier) == 0
     store.close()
+
+
+def test_local_provider_is_default_and_stays_on_this_machine(tmp_path, cfg):
+    assert cfg.ai_provider == "local"
+    assert isinstance(make_classifier(cfg), OpenAICompatibleClassifier)
+    assert "nothing leaves this machine" in describe_egress(cfg)
+    with pytest.raises(RuntimeError):
+        OpenAICompatibleClassifier("https://api.example.com/v1", "m", local_only=True)
+    for url in ("http://localhost:11434/v1", "http://127.0.0.1:1234/v1", "http://[::1]:8080/v1"):
+        assert is_local_url(url)
+    cfg.ai_provider, cfg.ai_base_url = "openai-compatible", "https://api.example.com/v1"
+    assert "api.example.com" in describe_egress(cfg)
+
+
+def test_openai_compatible_protocol_and_json_mode_fallback(tmp_path, cfg):
+    calls = []
+
+    def post(url, body, headers):
+        calls.append((url, body, headers))
+        if body["response_format"]["type"] == "json_schema":
+            return 400, {"error": "json_schema unsupported"}
+        groups = json.loads(body["messages"][1]["content"])["groups"]
+        content = json.dumps({"decisions": [{"id": g["id"], "action": "trash", "category": "promo", "reason": "r"}
+                                            for g in groups]})
+        return 200, {"choices": [{"message": {"content": "```json\n" + content + "\n```"}}]}
+
+    clf = OpenAICompatibleClassifier("http://localhost:11434/v1/", "llama3.1:8b", api_key="k", post=post)
+    out = clf.classify([{"id": "g0", "sender": "a@x.example"}])
+    assert out == {"a@x.example": {"action": "trash", "category": "promo", "reason": "r"}}
+    assert calls[0][0] == "http://localhost:11434/v1/chat/completions"
+    assert calls[0][1]["model"] == "llama3.1:8b" and calls[0][2]["Authorization"] == "Bearer k"
+    assert calls[1][1]["response_format"] == {"type": "json_object"}
 
 
 def test_ai_refusal_and_unknown_ids_are_ignored():

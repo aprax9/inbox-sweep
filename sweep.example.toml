@@ -7,15 +7,26 @@
 me = ["you@example.com"]
 
 [backend]
-type = "gmail"          # gmail | imap | demo
+type = "gmail"          # gmail | outlook | imap | demo
 credentials = "~/.config/inbox-sweep/credentials.json"   # Gmail OAuth client (see docs/gmail-api-setup.md)
 token = "~/.config/inbox-sweep/token.json"
+
+[outlook]
+# Outlook.com / Hotmail / Microsoft 365 via Microsoft Graph (see docs/outlook-setup.md)
+client_id = ""          # your Entra app registration's Application (client) ID
+authority = "common"    # "common", "consumers" (personal accounts only) or your tenant id
+token = "~/.config/inbox-sweep/outlook-token.json"
 
 [imap]
 host = "imap.gmail.com"
 port = 993
 user = "you@example.com"
 # Password is read from INBOX_SWEEP_IMAP_PASSWORD, or prompted. Use an app password.
+
+[privacy]
+# true: the CLI prints only counts, never senders or subjects. Use this when an AI
+# agent runs the commands, so no mail data reaches its provider. Same as --private.
+private = false
 
 [protect]
 # Never trashed, whatever their content.
@@ -51,10 +62,17 @@ other_automated = 90
 human_unknown = -1
 
 [ai]
-# Optional: classify ambiguous senders with Claude (pip install 'inbox-sweep[ai]').
-# Only sender names, addresses, counts and subject lines are sent. Never bodies.
+# Optional: ask a language model about senders the rules can't place.
+# Only sender names, addresses, counts and subject lines are used. Never bodies.
+#   provider = "local"             any OpenAI-compatible server on this machine (Ollama,
+#                                  LM Studio, llama.cpp, vLLM). Refuses non-local URLs.
+#   provider = "openai-compatible" the same protocol at any URL: data goes to that provider
+#   provider = "anthropic"         Claude (pip install 'inbox-sweep[ai]'): data goes to Anthropic
 enabled = false
-model = "claude-opus-5-5"
+provider = "local"
+model = ""              # blank = provider default (local: llama3.1:8b, anthropic: claude-opus-5-5)
+base_url = "http://localhost:11434/v1"   # Ollama's default; LM Studio uses http://localhost:1234/v1
+api_key_env = ""        # name of an environment variable holding the key, if the server needs one
 batch_size = 40
 min_messages = 1
 

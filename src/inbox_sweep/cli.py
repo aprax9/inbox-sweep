@@ -31,6 +31,7 @@ def _config(args) -> Config:
     cfg = load_config(path)
     if args.backend:
         cfg.backend = args.backend
+    cfg.private = cfg.private or bool(getattr(args, "private", False))
     if path is None and cfg.backend != "demo":
         raise ConfigError("No sweep.toml found. Run `inbox-sweep init`, or try `inbox-sweep demo`.")
     return cfg
@@ -47,14 +48,19 @@ def _decisions(store: Store):
     return decisions
 
 
-def _print_summary(s: dict) -> None:
+PRIVATE_NOTE = "(private mode: senders and subjects hidden. Review them in the local review page.)"
+
+
+def _print_summary(s: dict, private: bool = False) -> None:
     print(f"Messages: {s['messages']:,}  keep {s['keep_messages']:,}  trash {s['trash_messages']:,}")
     print(f"Threads:  keep {s['keep_threads']:,}  trash {s['trash_threads']:,}")
     if s["trash_by_category"]:
         print("\nTrash by category:")
         for cat, n in s["trash_by_category"].items():
             print(f"  {n:>7,}  {cat:<16} {CATEGORY_HELP.get(cat, '')}")
-    if s["top_trash_senders"]:
+    if private:
+        print("\n" + PRIVATE_NOTE)
+    elif s["top_trash_senders"]:
         print("\nTop senders going to Trash:")
         for sender, n in s["top_trash_senders"]:
             print(f"  {n:>7,}  {sender}")
@@ -74,9 +80,19 @@ def cmd_init(args) -> int:
 
 def cmd_auth(args) -> int:
     cfg = _config(args)
-    backend = get_backend(cfg, "gmail")
+    if cfg.backend not in ("gmail", "outlook"):
+        raise ConfigError("`auth` is for the gmail and outlook backends; IMAP uses an app password.")
+    backend = get_backend(cfg)
     say(f"Signed in as {backend.account()}")
     return 0
+
+
+def _problems(problems: list[str], private: bool) -> None:
+    if private:
+        say(f"  {len(problems)} protected messages would be affected (details hidden in private mode)")
+        return
+    for p in problems[:20]:
+        say("  " + p)
 
 
 def cmd_index(args) -> int:
@@ -88,7 +104,9 @@ def cmd_index(args) -> int:
         account = backend.account()
         say(f"Indexing {account} via {backend.name} (headers only)...")
         buffer, total = [], 0
-        for msg in backend.iter_messages(query=args.query, limit=args.limit, progress=say):
+        # Backend progress can name folders, so private mode stays quiet until the count.
+        progress = None if cfg.private else say
+        for msg in backend.iter_messages(query=args.query, limit=args.limit, progress=progress):
             buffer.append(msg)
             if len(buffer) >= 1000:
                 total += store.upsert_messages(buffer)
@@ -120,11 +138,12 @@ def cmd_classify(args) -> int:
 
         decisions = classify(messages, cfg, overrides=store.overrides(), ai=ai_verdicts())
         if args.ai or cfg.ai_enabled:
-            from inbox_sweep.ai import run_ai
+            from inbox_sweep.ai import describe_egress, run_ai
+            say(describe_egress(cfg))
             run_ai(store, cfg, messages, decisions, progress=say, max_groups=args.ai_max)
             decisions = classify(messages, cfg, overrides=store.overrides(), ai=ai_verdicts())
         store.save_decisions(decisions)
-        _print_summary(summarize(messages, decisions))
+        _print_summary(summarize(messages, decisions), cfg.private)
         print("\nNext: `inbox-sweep review --open`, then `inbox-sweep plan`.")
     return 0
 
@@ -132,7 +151,7 @@ def cmd_classify(args) -> int:
 def cmd_stats(args) -> int:
     cfg = _config(args)
     with _store(cfg) as store:
-        _print_summary(summarize(store.messages(), _decisions(store)))
+        _print_summary(summarize(store.messages(), _decisions(store)), cfg.private)
     return 0
 
 
@@ -157,8 +176,7 @@ def cmd_plan(args) -> int:
         problems = verify_plan(plan, messages, decisions, cfg)
         if problems:
             say("Refusing to write a plan that touches protected mail:")
-            for p in problems[:20]:
-                say("  " + p)
+            _problems(problems, cfg.private)
             return 2
         path = save_plan(plan, args.out or cfg.data_path / "plan.json")
     s = plan["summary"]
@@ -176,20 +194,24 @@ def cmd_apply(args) -> int:
         problems = verify_plan(plan, messages, decisions, cfg)
         if problems:
             say("Plan failed the safety check; nothing was changed:")
-            for p in problems[:20]:
-                say("  " + p)
+            _problems(problems, cfg.private)
             return 2
         s = plan["summary"]
         print(f"Account: {plan.get('account') or '(unknown)'}  backend: {plan.get('backend')}")
         print(f"Will move {s['trash_threads']:,} threads ({s['trash_messages']:,} messages) to Trash "
               f"and label {s['keep_messages']:,} kept messages '{plan.get('keep_label')}'.")
-        for e in plan["trash"][:10]:
-            print(f"  - {e['sender']}: {e['subject'][:70]}  [{e['category']}]")
+        if cfg.private:
+            for cat, n in s["by_category"].items():
+                print(f"  {n:>7,}  {cat}")
+        else:
+            for e in plan["trash"][:10]:
+                print(f"  - {e['sender']}: {e['subject'][:70]}  [{e['category']}]")
         if not args.yes:
             print("\nDry run. Nothing changed. Re-run with --yes to apply.")
             return 0
         backend = get_backend(cfg, plan.get("backend") or None)
-        result = apply_plan(plan, backend, cfg, messages, label_keep=not args.no_label, progress=say)
+        result = apply_plan(plan, backend, cfg, messages, label_keep=not args.no_label,
+                            progress=None if cfg.private else say)
         backend.close()
     print(f"Moved {result['trashed']:,} threads to Trash ({result['already']:,} done earlier, {result['failed']:,} failed).")
     print(f"Recoverable from Trash until about {result['recoverable_until']}.")
@@ -216,12 +238,15 @@ def cmd_unsubscribe(args) -> int:
     one_click = [c for c in cands if c["method"] == "one-click"]
     print(f"{len(cands)} senders are entirely going to Trash and have unsubscribe headers; "
           f"{len(one_click)} support one-click.")
-    for c in cands[:50]:
-        print(f"  {c['messages']:>5}  {c['method']:<9} {c['sender']}")
+    if cfg.private:
+        print(PRIVATE_NOTE)
+    else:
+        for c in cands[:50]:
+            print(f"  {c['messages']:>5}  {c['method']:<9} {c['sender']}")
     if not args.yes:
         print("\nDry run. Re-run with --yes to send one-click unsubscribes (others are listed for you).")
         return 0
-    result = unsub.run(cands, cfg.data_path / "unsubscribe-log.jsonl", progress=say)
+    result = unsub.run(cands, cfg.data_path / "unsubscribe-log.jsonl", progress=None if cfg.private else say)
     print(f"Unsubscribed {result['ok']}, failed {result['failed']}, manual {result['manual']}.")
     return 0
 
@@ -254,7 +279,8 @@ def cmd_demo(args) -> int:
                 .replace('data_dir = ".inbox-sweep"', f'data_dir = "{base.as_posix()}"'))
     cfg_path.write_text(cfg_text)
     ns = argparse.Namespace(config=str(cfg_path), backend=None, fresh=True, query=None, limit=None,
-                            overrides=None, ai=False, ai_max=None, out=None, open=args.open)
+                            overrides=None, ai=False, ai_max=None, out=None, open=args.open,
+                            private=getattr(args, "private", False))
     cmd_index(ns)
     cmd_classify(ns)
     cmd_review(ns)
@@ -267,14 +293,16 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="inbox-sweep", description=__doc__)
     p.add_argument("--version", action="version", version=f"inbox-sweep {__version__}")
     p.add_argument("--config", help="path to sweep.toml (default: ./sweep.toml)")
-    p.add_argument("--backend", choices=["gmail", "imap", "demo"], help="override [backend] type")
+    p.add_argument("--backend", choices=["gmail", "outlook", "imap", "demo"], help="override [backend] type")
+    p.add_argument("--private", action="store_true",
+                   help="print counts only, never senders or subjects (for AI agents running the CLI)")
     sub = p.add_subparsers(dest="command", required=True)
 
     s = sub.add_parser("init", help="write a starter sweep.toml")
     s.add_argument("--force", action="store_true")
     s.set_defaults(func=cmd_init)
 
-    sub.add_parser("auth", help="sign in to Gmail (opens a browser once)").set_defaults(func=cmd_auth)
+    sub.add_parser("auth", help="sign in to Gmail or Outlook (once)").set_defaults(func=cmd_auth)
 
     s = sub.add_parser("index", help="read headers into the local index")
     s.add_argument("--query", help="limit to a search (Gmail syntax for gmail and Gmail-over-IMAP)")
@@ -284,7 +312,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("classify", help="decide keep/trash for every message")
     s.add_argument("--overrides", help="decisions.json from the review page")
-    s.add_argument("--ai", action="store_true", help="ask Claude about ambiguous senders")
+    s.add_argument("--ai", action="store_true", help="ask a language model (local by default) about ambiguous senders")
     s.add_argument("--ai-max", type=int, help="cap the number of sender groups sent")
     s.set_defaults(func=cmd_classify)
 

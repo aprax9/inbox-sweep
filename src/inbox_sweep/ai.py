@@ -1,29 +1,41 @@
-"""Optional: let Claude judge the senders the rules can't place.
+"""Optional: let a language model judge the senders the rules can't place.
 
-Only senders whose mail is unprotected and categorised as "other_automated" or
-"human_unknown" are sent, grouped by sender, so a 20,000-message inbox is a few
-dozen requests. Each group carries the sender's name and address, message
-count, date range and up to six subject lines. Bodies are never sent.
+Provider-agnostic, and local by default:
 
-Subject lines come from strangers and may contain instructions; the prompt
-treats them as data, the output is schema-constrained, and AI verdicts can only
-affect mail that no protection rule already covers. Everything still goes
-through the review page and lands in Trash, not deleted.
+- provider = "local" (default): any OpenAI-compatible server on this machine
+  (Ollama, LM Studio, llama.cpp, vLLM). Refuses non-local URLs, so nothing leaves
+  your computer.
+- provider = "openai-compatible": the same protocol against any URL you choose
+  (a hosted model). Data goes to that provider.
+- provider = "anthropic": Claude through the official SDK. Data goes to Anthropic.
+
+Only senders whose mail is unprotected and categorised "other_automated" or
+"human_unknown" are sent, grouped by sender. Each group carries the sender's name
+and address, message count, date range and up to six subject lines. Bodies never.
+Subjects come from strangers and may contain instructions: the prompt treats them
+as data, output is schema-constrained, and verdicts can't override any protection.
 """
 
 from __future__ import annotations
 
+import ipaddress
 import json
+import os
 import time
+import urllib.error
+import urllib.request
 from collections import defaultdict
-from typing import Callable
+from typing import Callable, Protocol
+from urllib.parse import urlsplit
 
 from inbox_sweep.classify import AI_CATEGORIES
 from inbox_sweep.config import Config
 from inbox_sweep.model import Decision, Message
 from inbox_sweep.store import Store
 
-# Models that accept the server-side refusal fallback (see Anthropic docs).
+PROVIDERS = ("local", "openai-compatible", "anthropic")
+DEFAULT_MODELS = {"local": "llama3.1:8b", "anthropic": "claude-opus-5-5", "openai-compatible": ""}
+# Claude models that accept the server-side refusal fallback.
 FALLBACK_MODELS = {"claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5", "claude-fable-5-2", "claude-fable-5-1"}
 
 SYSTEM_PROMPT = """\
@@ -41,7 +53,8 @@ For each group choose:
   automated system mail, cold outreach from strangers, job-board and application-tracking mail.
 - "review": you genuinely cannot tell. Prefer this over guessing when a real acquaintance is plausible.
 
-Give a short reason (under 15 words) and a one-word category. Return one decision per group id."""
+Give a short reason (under 15 words) and a one-word category. Return one decision per group id, as JSON:
+{"decisions": [{"id": "...", "action": "keep|trash|review", "category": "...", "reason": "..."}]}"""
 
 OUTPUT_SCHEMA = {
     "type": "object",
@@ -64,6 +77,11 @@ OUTPUT_SCHEMA = {
     "required": ["decisions"],
     "additionalProperties": False,
 }
+
+
+class Classifier(Protocol):
+    model: str
+    def classify(self, groups: list[dict]) -> dict[str, dict]: ...
 
 
 def _month(ts: int) -> str:
@@ -99,33 +117,22 @@ def build_groups(messages: list[Message], decisions: list[Decision], already: se
     return groups
 
 
-def _request(client, model: str, groups: list[dict]):
-    payload = json.dumps({"groups": [{k: v for k, v in g.items()} for g in groups]}, ensure_ascii=False)
-    kwargs = dict(
-        model=model,
-        max_tokens=16000,
-        system=SYSTEM_PROMPT,
-        output_config={"effort": "low", "format": {"type": "json_schema", "schema": OUTPUT_SCHEMA}},
-        messages=[{"role": "user", "content": payload}],
-    )
-    if model in FALLBACK_MODELS:
-        # Server-side fallback: if the model declines, the API retries on a fallback model.
-        return client.beta.messages.create(betas=["server-side-fallback-2026-07-01"], fallbacks="default", **kwargs)
-    return client.messages.create(**kwargs)
+def _payload(groups: list[dict]) -> str:
+    return json.dumps({"groups": groups}, ensure_ascii=False)
 
 
-def parse_response(response, groups: list[dict]) -> dict[str, dict]:
-    """Map sender -> {action, category, reason}. Refusals and bad ids are skipped."""
-    if getattr(response, "stop_reason", None) == "refusal":
-        return {}
-    text = next((b.text for b in response.content if getattr(b, "type", "") == "text"), "")
+def parse_text(text: str, groups: list[dict]) -> dict[str, dict]:
+    """Map sender -> {action, category, reason} from the model's JSON. Unknown ids are dropped."""
+    text = (text or "").strip()
+    if text.startswith("```"):
+        text = text.strip("`").split("\n", 1)[-1]
     try:
         data = json.loads(text)
     except json.JSONDecodeError:
         return {}
     by_id = {g["id"]: g for g in groups}
     out = {}
-    for item in data.get("decisions", []):
+    for item in data.get("decisions", []) if isinstance(data, dict) else []:
         group = by_id.get(item.get("id"))
         if not group or item.get("action") not in ("keep", "trash", "review"):
             continue
@@ -137,26 +144,143 @@ def parse_response(response, groups: list[dict]) -> dict[str, dict]:
     return out
 
 
-def run_ai(store: Store, cfg: Config, messages: list[Message], decisions: list[Decision],
-           client=None, progress: Callable[[str], None] | None = None, max_groups: int | None = None) -> int:
-    """Classify undecided sender groups and cache the verdicts. Returns groups classified."""
-    if client is None:
+def parse_response(response, groups: list[dict]) -> dict[str, dict]:
+    """Anthropic response -> verdicts. Refusals yield nothing."""
+    if getattr(response, "stop_reason", None) == "refusal":
+        return {}
+    text = next((b.text for b in response.content if getattr(b, "type", "") == "text"), "")
+    return parse_text(text, groups)
+
+
+# -- providers ------------------------------------------------------------------------
+
+class AnthropicClassifier:
+    def __init__(self, model: str = "claude-opus-5-5", client=None):
+        if client is None:
+            try:
+                import anthropic
+            except ImportError as exc:
+                raise RuntimeError("provider 'anthropic' needs: pip install 'inbox-sweep[ai]'") from exc
+            client = anthropic.Anthropic()
+        self.client = client
+        self.model = model
+
+    def classify(self, groups: list[dict]) -> dict[str, dict]:
+        kwargs = dict(
+            model=self.model,
+            max_tokens=16000,
+            system=SYSTEM_PROMPT,
+            output_config={"effort": "low", "format": {"type": "json_schema", "schema": OUTPUT_SCHEMA}},
+            messages=[{"role": "user", "content": _payload(groups)}],
+        )
+        if self.model in FALLBACK_MODELS:
+            # If the model declines, the API retries on a fallback model server-side.
+            response = self.client.beta.messages.create(
+                betas=["server-side-fallback-2026-07-01"], fallbacks="default", **kwargs)
+        else:
+            response = self.client.messages.create(**kwargs)
+        return parse_response(response, groups)
+
+
+def is_local_url(url: str) -> bool:
+    host = (urlsplit(url).hostname or "").lower()
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def http_post_json(url: str, body: dict, headers: dict, timeout: float = 600) -> tuple[int, dict]:
+    req = urllib.request.Request(url, data=json.dumps(body).encode(), method="POST",
+                                 headers={"Content-Type": "application/json", **headers})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status, json.loads(resp.read() or b"{}")
+    except urllib.error.HTTPError as exc:
         try:
-            import anthropic
-        except ImportError as exc:
-            raise RuntimeError("AI step needs: pip install 'inbox-sweep[ai]'") from exc
-        client = anthropic.Anthropic()
+            return exc.code, json.loads(exc.read() or b"{}")
+        except json.JSONDecodeError:
+            return exc.code, {}
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"Can't reach the model server at {url}: {exc.reason}. "
+                           "For local models, start it first (e.g. `ollama serve` and `ollama pull <model>`).") from exc
+
+
+class OpenAICompatibleClassifier:
+    """Chat Completions protocol: Ollama, LM Studio, llama.cpp, vLLM, or a hosted provider."""
+
+    def __init__(self, base_url: str, model: str, api_key: str = "", local_only: bool = True,
+                 post: Callable[[str, dict, dict], tuple[int, dict]] | None = None):
+        if not model:
+            raise RuntimeError("Set [ai] model to a model your server provides.")
+        if local_only and not is_local_url(base_url):
+            raise RuntimeError(f"provider 'local' only talks to this machine, not {base_url}. "
+                               "Use provider = 'openai-compatible' if you mean to send data elsewhere.")
+        self.url = base_url.rstrip("/") + "/chat/completions"
+        self.model = model
+        self.api_key = api_key
+        self.post = post or http_post_json
+
+    def classify(self, groups: list[dict]) -> dict[str, dict]:
+        headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+        body = {
+            "model": self.model,
+            "temperature": 0,
+            "messages": [{"role": "system", "content": SYSTEM_PROMPT},
+                         {"role": "user", "content": _payload(groups)}],
+            "response_format": {"type": "json_schema",
+                                "json_schema": {"name": "decisions", "schema": OUTPUT_SCHEMA, "strict": True}},
+        }
+        status, data = self.post(self.url, body, headers)
+        if status == 400:  # older servers: fall back to plain JSON mode
+            body["response_format"] = {"type": "json_object"}
+            status, data = self.post(self.url, body, headers)
+        if status >= 400:
+            raise RuntimeError(f"Model server returned HTTP {status}: {json.dumps(data)[:200]}")
+        try:
+            text = data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError):
+            return {}
+        return parse_text(text, groups)
+
+
+def make_classifier(cfg: Config) -> Classifier:
+    provider = cfg.ai_provider
+    model = cfg.ai_model or DEFAULT_MODELS.get(provider, "")
+    if provider == "anthropic":
+        return AnthropicClassifier(model)
+    if provider in ("local", "openai-compatible"):
+        key = os.environ.get(cfg.ai_api_key_env, "") if cfg.ai_api_key_env else ""
+        return OpenAICompatibleClassifier(cfg.ai_base_url, model, key, local_only=(provider == "local"))
+    raise RuntimeError(f"Unknown [ai] provider '{provider}'. Use one of: {', '.join(PROVIDERS)}")
+
+
+def describe_egress(cfg: Config) -> str:
+    """One line saying where data goes, for the CLI to print before calling a model."""
+    if cfg.ai_provider == "local":
+        return f"AI step: local model at {cfg.ai_base_url} (nothing leaves this machine)"
+    if cfg.ai_provider == "anthropic":
+        return "AI step: sender names, addresses, counts and subject lines go to Anthropic"
+    return f"AI step: sender names, addresses, counts and subject lines go to {urlsplit(cfg.ai_base_url).hostname}"
+
+
+def run_ai(store: Store, cfg: Config, messages: list[Message], decisions: list[Decision],
+           classifier: Classifier | None = None, progress: Callable[[str], None] | None = None,
+           max_groups: int | None = None) -> int:
+    """Classify undecided sender groups and cache the verdicts. Returns groups classified."""
+    classifier = classifier or make_classifier(cfg)
     say = progress or (lambda _m: None)
     groups = build_groups(messages, decisions, set(store.ai_decisions()), store.overrides(), cfg.ai_min_messages)
     if max_groups is not None:
         groups = groups[:max_groups]
-    say(f"{len(groups)} sender groups to classify with {cfg.ai_model}")
+    say(f"{len(groups)} sender groups to classify with {classifier.model}")
     done = 0
     for start in range(0, len(groups), cfg.ai_batch_size):
         batch = groups[start:start + cfg.ai_batch_size]
-        verdicts = parse_response(_request(client, cfg.ai_model, batch), batch)
-        for sender, v in verdicts.items():
-            store.save_ai(sender, v["action"], v["category"], v["reason"], cfg.ai_model)
-        done += len(verdicts)
+        for sender, v in classifier.classify(batch).items():
+            store.save_ai(sender, v["action"], v["category"], v["reason"], classifier.model)
+            done += 1
         say(f"classified {done}/{len(groups)}")
     return done

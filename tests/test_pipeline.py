@@ -88,3 +88,17 @@ def test_cli_demo_and_overrides(tmp_path, capsys, monkeypatch):
     assert main(["--config", "d/sweep.toml", "plan"]) == 0
     assert main(["--config", "d/sweep.toml", "apply", "d/plan.json"]) == 0  # dry run
     assert "Dry run" in capsys.readouterr().out
+
+
+def test_private_mode_prints_no_senders_or_subjects(tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    assert main(["demo", "--dir", "d"]) == 0
+    capsys.readouterr()
+    for argv in (["classify"], ["stats"], ["apply", "d/plan.json"], ["unsubscribe"]):
+        assert main(["--private", "--config", "d/sweep.toml", *argv]) == 0
+    captured = capsys.readouterr()
+    text = captured.out + captured.err
+    assert "@" not in text.replace("you@example.com", "")
+    for subject_word in ("Weekly Reads", "free shipping", "Insights", "Notice of Assessment"):
+        assert subject_word not in text
+    assert "private mode" in text

@@ -22,7 +22,7 @@ inbox-sweep prompts for it. It is never written to disk.
 | iCloud | `imap.mail.me.com` | <https://account.apple.com>, Sign-In and Security, App-Specific Passwords |
 | Fastmail | `imap.fastmail.com` | Settings, Privacy & Security, App passwords |
 | Yahoo | `imap.mail.yahoo.com` | Account security, Generate app password |
-| Outlook.com / Microsoft 365 | Not supported yet: Microsoft requires OAuth for IMAP | |
+| Outlook.com / Microsoft 365 | Use the `outlook` backend instead: Microsoft requires OAuth ([setup](outlook-setup.md)) | |
 
 ## How IMAP mode behaves
 

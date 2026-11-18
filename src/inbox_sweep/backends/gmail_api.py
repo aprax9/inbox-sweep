@@ -73,7 +73,7 @@ def message_from_gmail(data: dict, label_names: dict[str, str],
         list_id=headers.get("list-id", ""),
         precedence=headers.get("precedence", ""),
         auto_submitted=headers.get("auto-submitted", ""),
-        snippet=data.get("snippet", "")[:200],
+        snippet="",  # Gmail returns a body snippet; it is deliberately not stored
         has_attachment=bool(attachment_ids and data["id"] in attachment_ids),
         message_id_header=headers.get("message-id", ""),
     )

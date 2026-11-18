@@ -4,14 +4,14 @@ build-backend = "hatchling.build"
 
 [project]
 name = "inbox-sweep"
-version = "0.1.0"
+version = "0.2.0"
 description = "Clean a decades-old inbox down to what you'd want in 20 years. Trash-only, protect-first, review before anything moves."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.10"
 authors = [{ name = "The inbox-sweep authors" }]
-keywords = ["gmail", "email", "inbox", "cleanup", "imap", "unsubscribe"]
+keywords = ["gmail", "outlook", "email", "inbox", "cleanup", "imap", "unsubscribe"]
 classifiers = [
   "Environment :: Console",
   "Intended Audience :: End Users/Desktop",
@@ -29,8 +29,9 @@ gmail = [
   "google-auth>=2.23",
   "google-auth-oauthlib>=1.1",
 ]
+outlook = ["msal>=1.28"]
 ai = ["anthropic>=2.0"]
-all = ["inbox-sweep[gmail,ai]"]
+all = ["inbox-sweep[gmail,outlook,ai]"]
 dev = ["pytest>=8", "inbox-sweep[all]"]
 
 [project.scripts]

@@ -38,10 +38,12 @@ or `Auto-Submitted` other than `no`.
 ## 4. AI verdict (optional)
 
 With `classify --ai`, senders whose remaining mail is `other_automated` or
-`human_unknown` are sent to Claude in groups, with the 20-year test as the brief.
-Each group carries name, address, count, date range and up to six subjects. Verdicts
-are cached in the index. Promotions, newsletters and the rest never need the AI:
-the rules already handle them.
+`human_unknown` go to a language model in groups, with the 20-year test as the
+brief. By default that's a **local** model (Ollama, LM Studio, llama.cpp or vLLM
+on this machine); hosted providers are opt-in (`[ai] provider`). Each group
+carries name, address, count, date range and up to six subjects. Verdicts are
+cached in the index. Promotions, newsletters and the rest never need the AI: the
+rules already handle them, and the whole tool works with the AI step off.
 
 ## 5. Retention by category
 

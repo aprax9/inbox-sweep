@@ -3,12 +3,18 @@
 ## What stays where
 
 - **Your machine:** the header index (`.inbox-sweep/index.db`), plans, logs, your
-  `sweep.toml`, and the Gmail OAuth token (`~/.config/inbox-sweep/token.json`,
-  mode `0600`). None of these should be committed. `.gitignore` excludes them.
-- **Never fetched:** message bodies and attachments.
-- **Sent to Anthropic, only with `classify --ai`:** sender names and addresses,
-  message counts, date ranges and up to six subject lines per sender, for senders
-  the rules couldn't place.
+  `sweep.toml`, and OAuth tokens (`~/.config/inbox-sweep/token.json` for Gmail,
+  `outlook-token.json` for Outlook, mode `0600`). None of these should be
+  committed. `.gitignore` excludes them.
+- **Never requested or stored:** message bodies, body previews and attachments.
+- **AI providers get nothing by default.** Every decision is made by local rules.
+  The optional AI step (`classify --ai`) defaults to `provider = "local"`, which
+  refuses any URL that isn't on this machine. Only with `openai-compatible` or
+  `anthropic`, which you must set explicitly, do sender names and addresses,
+  counts, date ranges and up to six subject lines per sender leave your machine.
+  The CLI prints where data goes before it calls a model.
+- **AI agents running the CLI** see everything it prints. `--private` (or
+  `[privacy] private = true`) limits output to counts and categories.
 - **Sent to senders, only with `unsubscribe --yes`:** one HTTPS POST per sender
   to the one-click URL from their own `List-Unsubscribe` header.
 
@@ -16,6 +22,9 @@
 
 - Gmail API: `gmail.modify` only. It can label and move to Trash. It cannot delete
   permanently or change settings.
+- Outlook (Microsoft Graph): delegated `Mail.ReadWrite` and `User.Read`, on your
+  own app registration. Trash means moving to Deleted Items. The permanent-delete
+  endpoints are never called.
 - IMAP: an app password you can revoke. inbox-sweep moves messages to the Trash
   folder and refuses servers where that would need a blanket `EXPUNGE`.
 

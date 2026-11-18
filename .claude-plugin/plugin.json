@@ -1,9 +1,9 @@
 {
   "name": "inbox-sweep",
-  "version": "0.1.0",
-  "description": "Clean a decades-old inbox down to what's worth keeping for 20 years: protect-first, trash-only, review before anything moves. Works through the Gmail API, IMAP, or by driving Gmail in a browser.",
+  "version": "0.2.0",
+  "description": "Clean a decades-old inbox down to what's worth keeping for 20 years: protect-first, trash-only, review before anything moves. Works through the Gmail API, Microsoft Graph (Outlook), IMAP, or by driving Gmail in a browser.",
   "author": { "name": "The inbox-sweep authors" },
   "license": "MIT",
   "repository": "https://github.com/aprax9/inbox-sweep",
-  "keywords": ["email", "gmail", "imap", "inbox", "cleanup", "unsubscribe"]
+  "keywords": ["email", "gmail", "outlook", "imap", "inbox", "cleanup", "unsubscribe"]
 }
