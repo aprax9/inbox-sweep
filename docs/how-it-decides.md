@@ -28,7 +28,8 @@ Skipped for senders listed in `[never_protect] senders`.
   This is how an employer's or school's people stay protected while its
   newsletters go.
 - **A person on a personal address**: a webmail or ISP domain, and nothing about
-  the message looks machine-sent.
+  the message looks machine-sent, unless the subject is plainly spam ("You've
+  won", "claim your prize").
 - A protected keyword in the subject (`[protect] keywords`), unless bulk.
 - Anything from the last `recent_days` (30). A review "Trash all" can override this.
 
@@ -48,7 +49,10 @@ rules already handle them, and the whole tool works with the AI step off.
 ## 5. Retention by category
 
 `categories.py` assigns each message one category from its subject, sender and
-headers. Promotions can never claim the documents category. `sweep.toml
+headers. Promotions can never claim the documents category. Non-bulk mail from a
+government domain (`.gov`, `.gc.ca`, `gov.uk`, `canada.ca`, `elster.de` and
+similar, in many countries) counts as documents. Tax, payslip and visa terms are
+recognised in several languages. `sweep.toml
 [retention]` says how many days each category is worth keeping (`-1` forever,
 `0` trash now).
 
@@ -62,3 +66,12 @@ never splits a conversation.
 `plan` and `apply` both re-derive step 1 from the index and refuse any plan that
 would trash absolutely protected mail, or a thread that also has kept messages.
 This guards against bugs, edited plans and stale indexes.
+
+Just before trashing, `apply` also asks the **live mailbox** which threads are
+protected by step 1 right now (starred, replied to, in a protected label, with a
+protected person) and skips any planned thread among them. Only the planned
+message ids move, so a message that arrives in a planned thread later stays put.
+
+The `Keep` label that `apply` adds to kept mail is an audit trail, not a rule: a
+later run can still trash a receipt once it is past its retention. To protect
+something permanently, star it or list its label in `[protect] labels`.

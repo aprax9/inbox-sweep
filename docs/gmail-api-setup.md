@@ -26,8 +26,16 @@ The token is saved to `~/.config/inbox-sweep/token.json` with `0600` permissions
 - **Testing mode expires tokens after 7 days.** If a later run says the token
   expired, run `inbox-sweep auth` again. Don't publish the app to "Production"
   for personal use: Gmail scopes are restricted and need Google's review.
-- **Quota.** inbox-sweep throttles itself under Gmail's per-user limit and retries
-  rate-limit errors. Reading 20,000 message headers takes a few minutes.
+- **Quota, and how long the first index takes.** Google Cloud projects created on
+  or after 1 May 2026 get 6,000 quota units per user per minute, and reading one
+  message's headers costs 20 units. inbox-sweep paces itself at 90% of that, so a
+  **first** index reads about 4.5 messages a second: 20,000 messages in about
+  75 minutes, 100,000 in about 6 hours. It's resumable, and later runs read only
+  new mail. Trashing and labelling are fast either way (1,000 messages per call).
+  Projects created before May 2026 keep the older, higher limits: set
+  `[gmail] quota = "legacy"` (about 45 messages a second). For a very large
+  inbox, [Gmail over IMAP](imap-setup.md) has no per-message quota and is much
+  faster to index.
 - **Revoke access** any time at <https://myaccount.google.com/permissions>.
 - **Google Workspace accounts** may need an admin to allow the app (internal apps
   can use Audience: Internal).

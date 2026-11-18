@@ -52,10 +52,12 @@ Ask:
 5. Subscriptions to keep receiving, and how long to keep money, receipts and
    travel mail (defaults: 3 years, 3 years, 1 year).
 
-Offer two ways to write this into `sweep.toml` (`inbox-sweep init` makes a
-template):
-- they fill it in themselves, which keeps even protected names out of the chat;
-- or you write it from their answers.
+Offer two ways to write this into `sweep.toml`:
+- they run `inbox-sweep init` in their own terminal: a short interview that
+  writes the file, and keeps even protected names out of the chat;
+- or you run it with their answers as flags:
+  `inbox-sweep init --me "a@gmail.com, b@work.com" --protect "Surname, mom@x.com" --domains "employer.com, school.edu"`.
+  Without a terminal and without `--me`, `init` writes the plain template.
 
 Point out when an employer's marketing address should go under
 `[never_protect]`: protecting a domain protects its people, not its mailing lists.
@@ -66,6 +68,11 @@ Default to API mode. Setup guides, about 5 minutes once:
 - Gmail: `docs/gmail-api-setup.md`
 - Outlook: `docs/outlook-setup.md`
 - anything else: `docs/imap-setup.md`
+
+Set expectations for Gmail. On a Google Cloud project created since May 2026,
+the **first** index reads about 4.5 messages a second (100,000 messages ≈ 6
+hours; resumable; later runs read only new mail). For a big Gmail inbox, suggest
+Gmail over IMAP with an app password instead: no per-message quota.
 
 Offer browser mode only for Gmail, and only if they'd rather skip setup *and*
 accept that you'll see their mail.
@@ -78,9 +85,10 @@ uv tool install "${CLAUDE_PLUGIN_ROOT}[gmail]"      # or [outlook]; IMAP needs n
 ```
 Then, always with `--private`:
 ```
-inbox-sweep init                                   # they fill in sweep.toml (step 1)
+inbox-sweep init                                   # step 1: they run it, or you pass flags
+inbox-sweep --private doctor                       # fix anything it flags before going on
 inbox-sweep --private auth                         # Gmail/Outlook: they complete sign-in
-inbox-sweep --private index                        # headers only
+inbox-sweep --private index                        # headers only; later runs read new mail only
 inbox-sweep --private classify                     # local rules: counts by category
 inbox-sweep --private review --open                # opens in THEIR browser; you don't read it
 #   they adjust senders, click "Download decisions.json", and tell you when done
@@ -93,6 +101,14 @@ inbox-sweep --private unsubscribe                  # dry run; --yes only after a
 
 - Interrupted? Re-run the same `apply`: it resumes from its log.
 - Regret? `inbox-sweep --private undo .inbox-sweep/trash-log-*.jsonl --yes`.
+- `apply` re-checks the live mailbox: anything they star or reply to after
+  indexing is skipped. Tell them: "star anything you want to be sure of."
+- `plan`/`apply` refuse decisions or plans older than the last `index`. Re-run
+  `classify` and `plan` (seconds) rather than forcing it.
+- Did they clean up by hand before, with a label on what they kept? Offer
+  `inbox-sweep --private index --include-trash --fresh` then
+  `inbox-sweep --private eval --truth-label <label>`: it scores the rules against
+  their own past decisions, locally, and prints only counts.
 - `classify --ai` uses the local model in `[ai]` (Ollama by default). If no
   local server is running, skip it: the rules and their review are enough.
 
@@ -107,6 +123,7 @@ is available; otherwise build them from the playbook's table.
 Give:
 - counts before and after;
 - what was trashed, by category;
+- how many threads were skipped because they became protected after indexing;
 - what kinds of mail were protected;
 - unsubscribe results;
 - the date Trash empties (about 30 days).
