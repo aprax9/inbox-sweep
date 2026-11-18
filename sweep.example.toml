@@ -1,0 +1,66 @@
+# inbox-sweep configuration. Keep this file private: it names the people you protect.
+# The test every rule serves: "Would I ever need this in 20 years, and would it
+# upset me if I needed it and couldn't find it?"
+
+[account]
+# Every address you send from. Used to find threads you replied in and people you've written to.
+me = ["you@example.com"]
+
+[backend]
+type = "gmail"          # gmail | imap | demo
+credentials = "~/.config/inbox-sweep/credentials.json"   # Gmail OAuth client (see docs/gmail-api-setup.md)
+token = "~/.config/inbox-sweep/token.json"
+
+[imap]
+host = "imap.gmail.com"
+port = 993
+user = "you@example.com"
+# Password is read from INBOX_SWEEP_IMAP_PASSWORD, or prompted. Use an app password.
+
+[protect]
+# Never trashed, whatever their content.
+people = []          # exact addresses ("mom@example.com") or display-name words ("Smith")
+domains = []         # employers' and schools' domains (people there, not their marketing)
+keywords = []        # subject words that make mail sentimental to you, e.g. a school's name
+labels = []          # your own labels to protect, e.g. ["Taxes", "Family"]
+personal_domains = []  # extra webmail domains (your ISP, a regional provider)
+starred = true
+replied_threads = true   # any thread you ever replied in
+correspondents = true    # anyone you have ever emailed (bulk mail from them still goes)
+recent_days = 30         # leave the last N days alone as your working set
+
+[never_protect]
+# Senders that look protected but aren't, e.g. an employer's newsletter address.
+senders = []
+
+[retention]
+# Days to keep each category. -1 = forever, 0 = trash now.
+documents = -1
+person_payment = 1095
+job_process = 365
+receipt = 1095
+booking = 365
+security = 30
+reminder = 30
+account_notice = 30
+job_automated = 0
+newsletter = 0
+promotion = 0
+social = 0
+other_automated = 90
+human_unknown = -1
+
+[ai]
+# Optional: classify ambiguous senders with Claude (pip install 'inbox-sweep[ai]').
+# Only sender names, addresses, counts and subject lines are sent. Never bodies.
+enabled = false
+model = "claude-opus-5-5"
+batch_size = 40
+min_messages = 1
+
+[apply]
+keep_label = "Keep"     # applied to everything kept, so you can audit in your mail app
+batch_size = 50
+
+[paths]
+data_dir = ".inbox-sweep"

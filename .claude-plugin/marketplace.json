@@ -1,0 +1,12 @@
+{
+  "name": "inbox-sweep",
+  "description": "Marketplace for the inbox-sweep plugin",
+  "owner": { "name": "The inbox-sweep authors" },
+  "plugins": [
+    {
+      "name": "inbox-sweep",
+      "source": "./",
+      "description": "Clean a decades-old inbox down to what's worth keeping for 20 years, via the Gmail API, IMAP, or the Gmail web UI."
+    }
+  ]
+}

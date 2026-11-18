@@ -1,0 +1,27 @@
+# Your mail data and secrets: never commit these
+sweep.toml
+.inbox-sweep/
+.inbox-sweep-demo/
+*.db
+credentials.json
+token.json
+decisions.json
+plan.json
+trash-log-*.jsonl
+unsubscribe-log.jsonl
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.coverage
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
