@@ -249,3 +249,22 @@ def test_courier_style_folders():
     cfg = Config()
     cfg.me, cfg.protect_labels, cfg.recent_days = ["me@example.com"], ["Family"], 0
     assert [d.action for d in classify(msgs, cfg)] == ["keep"]
+
+
+def test_folder_renumbered_between_check_and_move_moves_nothing():
+    srv = FakeIMAP({"INBOX": {"uidvalidity": 7, "msgs": {
+        2: {"raw": raw_header("deals@shop.example", "Sale", msgid="<b@x>", extra=LU), "flags": []}}},
+        "Trash": {"flags": ["\\Trash"], "uidvalidity": 10}})
+    imap = ImapBackend("h", 993, "me@example.com", "secret", connect_fn=lambda: srv)
+    real_select = srv.select
+
+    def select(mailbox, readonly=False):
+        if not readonly:  # the read-write select that precedes the move sees a renumbered folder
+            srv.folders["INBOX"]["uidvalidity"] = 8
+        return real_select(mailbox, readonly)
+
+    srv.select = select
+    entry = {"thread_id": "t", "messages": [{"id": "INBOX|7|2", "folder": "INBOX", "uid": 2, "uidvalidity": "7",
+                                             "message_id_header": "<b@x>"}]}
+    assert imap.trash([entry]) == []
+    assert 2 in srv.folders["INBOX"]["msgs"]

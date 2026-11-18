@@ -713,8 +713,10 @@ class ImapBackend(Backend):
         # Check every folder and every message before moving anything.
         mismatched: set[str] = set()
         checked: dict[str, list[tuple[str, dict, int]]] = {}
+        checked_uv: dict[str, str] = {}
         for folder, items in by_folder.items():
             current = self._select(folder, readonly=True)
+            checked_uv[folder] = current
             for _, ref in items:
                 expected = str(ref.get("uidvalidity") or "")
                 if expected and current and expected != current:
@@ -732,7 +734,10 @@ class ImapBackend(Backend):
         if mismatched and progress:
             progress(f"{len(mismatched)} threads skipped: the server's copy no longer matches the index")
         for folder, items in checked.items():
-            self._select(folder, readonly=False)
+            # UIDs are only unique within one UIDVALIDITY: confirm nothing changed since the check.
+            if self._select(folder, readonly=False) != checked_uv[folder]:
+                failed.update(tid for tid, _, _ in items)
+                continue
             group_items = [item for item in items if item[0] not in mismatched]
             for group in chunked(group_items, MOVE_CHUNK):
                 try:
