@@ -142,3 +142,26 @@ def test_bad_configs_give_a_clear_error_not_a_traceback(tmp_path, monkeypatch, c
     monkeypatch.chdir(tmp_path)
     assert main(["stats"]) == 2
     assert needle in capsys.readouterr().err
+
+
+
+@pytest.mark.parametrize("entry,parsed", [
+    ("Mom <Mom@Family.example>", "mom@family.example"),
+    ("mom@family.example", "mom@family.example"),
+    ('"Okonkwo, Ada" <ada@family.example>', "ada@family.example"),
+    ("Okonkwo", "Okonkwo"),
+])
+def test_protected_people_accept_address_book_format(tmp_path, entry, parsed):
+    path = tmp_path / "sweep.toml"
+    path.write_text(render_config(provider="gmail", me=["me@gmail.com"], people=[entry]), encoding="utf-8")
+    assert load_config(path).protect_people == [parsed]
+
+
+@pytest.mark.parametrize("entry", ["@family.example", "mom@", "mom at family.example <@>", "two@a.example b@c.example"])
+def test_protected_people_reject_entries_that_would_protect_nothing(tmp_path, entry):
+    from inbox_sweep.config import ConfigError
+
+    path = tmp_path / "sweep.toml"
+    path.write_text(render_config(provider="gmail", me=["me@gmail.com"], people=[entry]), encoding="utf-8")
+    with pytest.raises(ConfigError, match="people"):
+        load_config(path)

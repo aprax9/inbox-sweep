@@ -112,7 +112,8 @@ def test_copy_and_uidplus_expunge_path():
     server = generic_server()
     server.caps = ["IMAP4REV1", "UIDPLUS"]
     imap = make(server)
-    entry = {"thread_id": "t", "messages": [{"id": "INBOX|7|2", "folder": "INBOX", "uid": 2, "uidvalidity": "7"}]}
+    entry = {"thread_id": "t", "messages": [{"id": "INBOX|7|2", "folder": "INBOX", "uid": 2, "uidvalidity": "7",
+                                             "message_id_header": "<b@x>"}]}
     assert imap.trash([entry]) == ["t"]
     assert 2 not in server.folders["INBOX"]["msgs"] and 1 in server.folders["INBOX"]["msgs"]
 

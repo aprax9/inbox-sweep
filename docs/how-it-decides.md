@@ -9,8 +9,11 @@ order. The first that applies wins.
 - Mail you sent, and **every thread you replied in**. Your replies are the
   strongest signal there is.
 - Starred mail.
-- Mail in any label listed in `[protect] labels`.
-- Mail from or to an address in `[protect] people`.
+- Mail in any label listed in `[protect] labels`, or in a label or folder nested
+  inside it ("Family" covers "Family/Photos", Outlook's "Inbox/Family" and
+  Courier's "INBOX.Family"). Matching ignores case and works in any language.
+- Mail from or to an address in `[protect] people` (address-book entries like
+  `Mom <mom@example.com>` work).
 
 ## 2. Your review decisions
 
@@ -27,9 +30,11 @@ Skipped for senders listed in `[never_protect] senders`.
 - A **protected domain** (`[protect] domains`), unless the message is bulk mail.
   This is how an employer's or school's people stay protected while its
   newsletters go.
-- **A person on a personal address**: a webmail or ISP domain, and nothing about
-  the message looks machine-sent, unless the subject is plainly spam ("You've
-  won", "claim your prize").
+- **A person on a personal address**: a webmail or ISP domain, and the headers
+  show no sign of bulk or no-reply mail. The subject never removes this
+  protection (a grandparent's "You won't believe this…" reads like spam), and
+  neither does Gmail filing the message under Updates or Promotions. Spam from
+  webmail is therefore kept: trash those senders on the review page.
 - A protected keyword in the subject (`[protect] keywords`), unless bulk.
 - Anything from the last `recent_days` (30). A review "Trash all" can override this.
 

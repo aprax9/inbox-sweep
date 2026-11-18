@@ -234,7 +234,7 @@ def test_cli_refuses_plans_and_decisions_from_an_older_index(tmp_path, capsys, m
     time.sleep(1.1)  # indexed_at has one-second resolution
     assert main(["--config", "d/sweep.toml", "index"]) == 0
     assert main(["--config", "d/sweep.toml", "apply", "d/plan.json", "--yes"]) == 2
-    assert "index changed since this plan" in capsys.readouterr().err
+    assert "wasn't made from the current index" in capsys.readouterr().err
     assert main(["--config", "d/sweep.toml", "plan"]) == 2
     assert "classify` again" in capsys.readouterr().err
     assert main(["--config", "d/sweep.toml", "classify"]) == 0
@@ -259,3 +259,107 @@ def test_trash_folder_mail_is_never_planned(env):
     victim.labels.append(TRASH)
     plan = build_plan(messages, decisions, cfg)
     assert victim.id not in {r["id"] for e in plan["trash"] for r in e["messages"]}
+
+
+# -- review findings: partial indexes, tampered locators, the log after undo ----------------
+def test_a_crashed_index_blocks_classify_plan_and_apply(tmp_path, capsys, monkeypatch):
+    import inbox_sweep.cli as cli
+
+    monkeypatch.chdir(tmp_path)
+    assert main(["demo", "--dir", "d"]) == 0
+    box = DemoBackend(tmp_path / "d" / "demo-mailbox.json")
+
+    class Crashy(DemoBackend):
+        def sync(self, known, **kw):
+            for m in self.iter_messages():
+                if SENT not in m.labels:
+                    yield ("new", m)
+            raise ConnectionError("network dropped")
+
+    real_get = cli.get_backend
+    monkeypatch.setattr(cli, "get_backend", lambda cfg, kind=None, interactive=True: Crashy(box.path))
+    capsys.readouterr()
+    assert main(["--config", "d/sweep.toml", "index", "--fresh"]) == 2
+    for argv in (["classify"], ["plan"], ["apply", "d/plan.json", "--yes"]):
+        assert main(["--config", "d/sweep.toml", *argv]) == 2
+        assert "index is incomplete" in capsys.readouterr().err
+    assert box.trashed_thread_ids() == set()
+    monkeypatch.setattr(cli, "get_backend", real_get)
+    assert main(["--config", "d/sweep.toml", "index"]) == 0  # finishing the index unblocks everything
+    assert main(["--config", "d/sweep.toml", "classify"]) == 0
+
+
+def test_plans_from_older_versions_without_an_index_time_are_refused(env):
+    cfg, backend, messages, _, plan = env
+    plan["indexed_at"] = None
+    with pytest.raises(PlanError, match="doesn't record when"):
+        apply_plan(plan, backend, cfg, messages)
+
+
+def test_verify_plan_catches_edited_locators(tmp_path):
+    from inbox_sweep.model import Message as M
+    cfg = Config()
+    cfg.me = [ME]
+    msgs = [M(id="INBOX|7|2", thread_id="t", date=0, from_email="deals@shop.example", folder="INBOX", uid=2,
+              message_id_header="<a@x>", list_unsubscribe="<https://x/u>")]
+    decisions = classify(msgs, cfg, now=10 ** 10)
+    plan = build_plan(msgs, decisions, cfg)
+    assert verify_plan(plan, msgs, decisions, cfg) == []
+    for key, value in (("uid", 99), ("folder", "Family"), ("uidvalidity", "8"), ("message_id_header", "<b@x>")):
+        edited = json.loads(json.dumps(plan))
+        edited["trash"][0]["messages"][0][key] = value
+        assert any(key in p for p in verify_plan(edited, msgs, decisions, cfg)), key
+
+
+def test_undo_is_recorded_so_reapplying_trashes_again_and_undo_twice_is_safe(env):
+    cfg, backend, messages, _, plan = env
+    first = apply_plan(plan, backend, cfg, messages)
+    assert undo(first["log"], backend, cfg)["restored"] == first["trashed"]
+    assert undo(first["log"], backend, cfg) == {"restored": 0, "total": 0}  # nothing left to restore
+    again = apply_plan(plan, backend, cfg, messages)
+    assert again["trashed"] == first["trashed"] and again["already"] == 0
+    assert backend.trashed_thread_ids() == {e["thread_id"] for e in plan["trash"]}
+
+
+def test_keep_label_is_not_redone_on_resume(env, tmp_path):
+    cfg, _, messages, _, plan = env
+    flaky = Flaky(tmp_path / "demo-mailbox.json", me=ME)
+    calls = []
+    flaky.label_messages = lambda msgs, label, progress=None: calls.append(len(msgs))
+    with pytest.raises(ConnectionError):
+        apply_plan(plan, flaky, cfg, messages)
+    resumed = DemoBackend(tmp_path / "demo-mailbox.json", me=ME)
+    resumed.label_messages = lambda msgs, label, progress=None: calls.append(len(msgs))
+    apply_plan(plan, resumed, cfg, messages)
+    assert len(calls) == 1
+
+
+def test_undo_all_restores_every_run(tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    assert main(["demo", "--dir", "d"]) == 0
+    box = DemoBackend(tmp_path / "d" / "demo-mailbox.json")
+    assert main(["--config", "d/sweep.toml", "apply", "d/plan.json", "--yes"]) == 0
+    first = box.trashed_thread_ids()
+    # A second sweep with stricter rules writes a second log.
+    assert main(["--config", "d/sweep.toml", "index"]) == 0
+    assert main(["--config", "d/sweep.toml", "classify"]) == 0
+    assert main(["--config", "d/sweep.toml", "plan"]) == 0
+    assert main(["--config", "d/sweep.toml", "undo", "--all"]) == 0  # dry run
+    assert main(["--config", "d/sweep.toml", "undo", "--all", "--yes"]) == 0
+    assert box.trashed_thread_ids() == set() and first
+
+
+def test_network_errors_are_reported_cleanly(tmp_path, capsys, monkeypatch):
+    import inbox_sweep.cli as cli
+
+    monkeypatch.chdir(tmp_path)
+    assert main(["demo", "--dir", "d"]) == 0
+
+    def boom(cfg, kind=None, interactive=True):
+        raise ConnectionResetError("connection reset by peer")
+
+    monkeypatch.setattr(cli, "get_backend", boom)
+    capsys.readouterr()
+    assert main(["--config", "d/sweep.toml", "index"]) == 2
+    err = capsys.readouterr().err
+    assert "connection reset" in err and "pick up where they stopped" in err

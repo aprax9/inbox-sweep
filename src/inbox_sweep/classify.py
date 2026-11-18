@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 
 from inbox_sweep.categories import categorize
 from inbox_sweep.config import FOREVER, Config
-from inbox_sweep.headers import domain_matches, is_bulk, is_machine, is_personal_domain
+from inbox_sweep.headers import domain_matches, is_bulk, is_noreply_address, is_personal_domain
 from inbox_sweep.model import SENT, STARRED, Decision, Message
 
 DAY = 86400
@@ -68,8 +68,8 @@ def _name_hit(text: str, words: list[str]) -> str:
 def protection(msg: Message, cfg: Config, ctx: Context, now: int, category: str = "") -> tuple[str, str]:
     """Return (level, reason) where level is "absolute", "soft" or "".
 
-    `category` only matters for one rule: scam-like subjects ("You won!") don't get
-    the personal-address protection, since spam is often sent from webmail.
+    Subject lines never remove a protection: a grandparent's "You won't believe
+    this" must not be read as spam. (`category` is accepted for compatibility.)
     """
     sender = msg.from_email
     if msg.from_email in ctx.me:
@@ -79,7 +79,7 @@ def protection(msg: Message, cfg: Config, ctx: Context, now: int, category: str 
     if cfg.protect_starred and STARRED in msg.labels:
         return "absolute", "starred"
     for label in cfg.protect_labels:
-        if msg.has_label(label):
+        if msg.in_label(label):  # the label, anything nested in it, or the same folder under Inbox/
             return "absolute", f"in your '{label}' label"
     emails = [p.lower() for p in cfg.protect_people if "@" in p]
     if sender in emails or any(addr in emails for addr in msg.to + msg.cc):
@@ -97,7 +97,9 @@ def protection(msg: Message, cfg: Config, ctx: Context, now: int, category: str 
                 return "soft", "someone you've written to"
             if cfg.protect_domains and domain_matches(sender, cfg.protect_domains):
                 return "soft", "protected domain (a person, not a mailing)"
-            if (category != "spam_like" and not is_machine(msg)
+            # Only header evidence counts as machine-sent here; Gmail's tab guesses
+            # (Updates, Promotions) misfile real people too often.
+            if (not is_bulk(msg) and not is_noreply_address(msg.from_email)
                     and is_personal_domain(msg.from_domain, ctx.personal_domains)):
                 return "soft", "a person on a personal address"
         hit = _name_hit(msg.subject + " " + msg.from_name, cfg.protect_keywords)

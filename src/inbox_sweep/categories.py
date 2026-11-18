@@ -63,7 +63,8 @@ DOCUMENTS = re.compile(
     _I,
 )
 SPAMMY = re.compile(
-    r"you('ve| have)? won|winner|lottery|jackpot|inheritance|beneficiary|claim your (prize|reward|funds)|"
+    r"\byou('ve| have)? won\b(?!['\u2019]t)|\bwinner\b|lottery|jackpot|inheritance fund|beneficiary|"
+    r"claim your (prize|reward|funds)|"
     r"million (dollars|usd|euros)|western union|wire transfer fee|bitcoin (giveaway|investment)|"
     r"urgent (reply|response) (needed|required)|dear (friend|beneficiary)|reply for details",
     _I,

@@ -154,7 +154,7 @@ def test_apply_then_undo_restores_exactly_the_original_state(tmp_path_factory, m
     cfg.apply_batch_size = random.Random(len(messages)).randint(1, 7)
     backend = MemoryBackend(messages)
     original = {k: set(v) for k, v in backend.labels.items()}
-    plan = build_plan(messages, classify(messages, cfg, now=NOW), cfg)
+    plan = build_plan(messages, classify(messages, cfg, now=NOW), cfg, indexed_at=NOW)
     result = apply_plan(plan, backend, cfg, messages, label_keep=False, live_check=False, now=NOW)
     planned = {r["id"] for e in plan["trash"] for r in e["messages"]}
     assert {mid for mid, labels in backend.labels.items() if TRASH in labels and TRASH not in original[mid]} == planned

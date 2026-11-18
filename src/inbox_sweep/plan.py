@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import time
 from collections import Counter
 from pathlib import Path
@@ -136,6 +137,14 @@ def verify_plan(plan: dict, messages: list[Message], decisions: list[Decision], 
                 continue
             if m.thread_id != entry["thread_id"]:
                 problems.append(f"message {m.id} belongs to another thread")
+            # The locators a backend acts on must be the index's, not whatever the file says.
+            expected = _ref(m, {})
+            changed = [k for k in ("folder", "uid", "message_id_header") if k in ref and ref[k] != expected[k]]
+            if expected["uidvalidity"] and str(ref.get("uidvalidity") or expected["uidvalidity"]) != expected["uidvalidity"]:
+                changed.append("uidvalidity")
+            if changed:
+                problems.append(f"message {m.id}: the plan's {', '.join(changed)} doesn't match the index "
+                                "(re-run `inbox-sweep plan`)")
             level, why = protection(m, cfg, ctx, now)
             if level == "absolute":
                 problems.append(f"{m.from_email} {m.subject!r}: {why}")
@@ -147,9 +156,10 @@ def log_path_for(plan: dict, cfg: Config) -> Path:
 
 
 def read_log(path: Path) -> dict[str, dict]:
-    """Thread id -> {"phase": "pending"|"done", "messages": [...]}; later lines win.
+    """Thread id -> {"phase": "pending"|"done"|"restored", "messages": [...]}; later lines win,
+    except that "pending" never replaces "done" (it can only be a re-sent batch).
 
-    A torn last line (crash mid-write) is ignored.
+    Lines without a thread id (markers) and a torn last line (crash mid-write) are ignored.
     """
     out: dict[str, dict] = {}
     if not path.exists():
@@ -167,8 +177,30 @@ def read_log(path: Path) -> dict[str, dict]:
         phase = rec.get("phase", "done")  # v0.1 logs only had done lines
         if out.get(tid, {}).get("phase") == "done" and phase == "pending":
             continue
-        out[tid] = {"phase": phase, "messages": rec.get("messages", [])}
+        out[tid] = {"phase": phase, "messages": rec.get("messages") or out.get(tid, {}).get("messages", [])}
     return out
+
+
+def _markers(path: Path) -> set[str]:
+    found = set()
+    if path.exists():
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(rec, dict) and not rec.get("thread_id") and rec.get("phase"):
+                found.add(rec["phase"])
+    return found
+
+
+def _durable(fh) -> None:
+    """Flush to disk: the log must survive a power cut, or undo can't see what moved."""
+    fh.flush()
+    try:
+        os.fsync(fh.fileno())
+    except OSError:
+        pass
 
 
 def live_protection(cfg: Config, messages: list[Message]) -> LiveProtection:
@@ -193,20 +225,29 @@ def apply_plan(plan: dict, backend: Backend, cfg: Config, messages: list[Message
     if plan.get("account") and account and plan["account"].lower() != account.lower():
         raise PlanError(f"Plan is for {plan['account']} but the backend is signed in as {account}")
     indexed_at = plan.get("indexed_at")
+    if not indexed_at and not allow_stale:
+        raise PlanError("This plan doesn't record when its index was built (an older version made it). "
+                        "Run `inbox-sweep index`, `classify` and `plan` again.")
     max_age = cfg.max_index_age_days * 86400
     if indexed_at and max_age and now - indexed_at > max_age and not allow_stale:
         days = int((now - indexed_at) / 86400)
         raise PlanError(f"This plan was built from an index {days} days old. Run `inbox-sweep index` "
                         "(incremental, fast), `classify` and `plan` again, or pass --allow-stale.")
 
-    if label_keep and plan.get("keep_label") and backend.supports_labels:
-        keep_ids = set(plan.get("keep_message_ids", []))
-        keep_msgs = [m for m in messages if m.id in keep_ids]
-        say(f"Labelling {len(keep_msgs)} kept messages '{plan['keep_label']}'")
-        backend.label_messages(keep_msgs, plan["keep_label"], progress=say)
-
     log = log_path_for(plan, cfg)
     log.parent.mkdir(parents=True, exist_ok=True)
+    if label_keep and plan.get("keep_label") and backend.supports_labels:
+        if "keep-labelled" in _markers(log):
+            say("Kept mail was already labelled by an earlier run of this plan")
+        else:
+            keep_ids = set(plan.get("keep_message_ids", []))
+            keep_msgs = [m for m in messages if m.id in keep_ids]
+            say(f"Labelling {len(keep_msgs)} kept messages '{plan['keep_label']}'")
+            backend.label_messages(keep_msgs, plan["keep_label"], progress=say)
+            with log.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps({"phase": "keep-labelled", "count": len(keep_msgs), "at": int(time.time())}) + "\n")
+                _durable(fh)
+
     state = read_log(log)
     done = {tid for tid, rec in state.items() if rec["phase"] == "done"}
     todo = [e for e in plan["trash"] if e["thread_id"] not in done]
@@ -231,7 +272,7 @@ def apply_plan(plan: dict, backend: Backend, cfg: Config, messages: list[Message
             for entry in batch:  # intent first: undo can reverse a crash mid-batch
                 fh.write(json.dumps({"phase": "pending", "thread_id": entry["thread_id"],
                                      "messages": entry["messages"], "at": int(time.time())}) + "\n")
-            fh.flush()
+            _durable(fh)
             ok = set(backend.trash(batch, progress=say))
             for entry in batch:
                 if entry["thread_id"] in ok:
@@ -240,23 +281,36 @@ def apply_plan(plan: dict, backend: Backend, cfg: Config, messages: list[Message
                     trashed += 1
                 else:
                     failed += 1
-            fh.flush()
+            _durable(fh)
             say(f"Trashed {len(done) + trashed}/{len(plan['trash'])} threads")
     return {"trashed": trashed, "already": len(done), "failed": failed, "skipped_protected": len(skipped),
             "log": str(log),
             "recoverable_until": time.strftime("%Y-%m-%d", time.localtime(now + TRASH_RETENTION_DAYS * 86400))}
 
 
-def undo(log: str | Path, backend: Backend, cfg: Config, progress: Callable[[str], None] | None = None) -> dict:
-    """Restore every thread in the log, including ones a crash left as pending."""
+def undo(log, backend: Backend, cfg: Config, progress: Callable[[str], None] | None = None) -> dict:
+    """Restore every thread in the log(s), including ones a crash left as pending.
+
+    `log` is one path or a list. Restored threads are recorded in the log, so undo
+    can be re-run safely and applying the same plan again trashes them again.
+    """
     say = progress or (lambda _m: None)
-    path = Path(log)
-    if not path.exists():
-        raise PlanError(f"No such log: {path}")
-    state = read_log(path)
-    entries = [{"thread_id": tid, "messages": rec["messages"]} for tid, rec in state.items()]
-    restored = 0
-    for batch in chunked(entries, cfg.apply_batch_size):
-        restored += len(backend.restore(batch, progress=say))
-        say(f"Restored {restored}/{len(entries)} threads")
-    return {"restored": restored, "total": len(entries)}
+    paths = [Path(p) for p in (log if isinstance(log, (list, tuple)) else [log])]
+    for path in paths:
+        if not path.exists():
+            raise PlanError(f"No such log: {path}")
+    restored = total = 0
+    for path in paths:
+        state = read_log(path)
+        entries = [{"thread_id": tid, "messages": rec["messages"]} for tid, rec in state.items()
+                   if rec["phase"] in ("pending", "done")]
+        total += len(entries)
+        with path.open("a", encoding="utf-8") as fh:
+            for batch in chunked(entries, cfg.apply_batch_size):
+                ok = backend.restore(batch, progress=say)
+                for tid in ok:
+                    fh.write(json.dumps({"phase": "restored", "thread_id": tid, "at": int(time.time())}) + "\n")
+                _durable(fh)
+                restored += len(ok)
+                say(f"Restored {restored}/{total} threads")
+    return {"restored": restored, "total": total}

@@ -216,13 +216,12 @@ class DemoBackend(Backend):
 
     def protected_thread_ids(self, protect: LiveProtection) -> set[str] | None:
         out = set()
-        wanted_labels = {l.lower() for l in protect.labels}
         for m in self._load():
             if TRASH in m.labels:
                 continue
             if ((protect.starred and STARRED in m.labels)
                     or (protect.sent and (SENT in m.labels or m.from_email in protect.me))
-                    or any(l.lower() in wanted_labels for l in m.labels)
+                    or any(m.in_label(wanted) for wanted in protect.labels)
                     or m.from_email in protect.people or any(a in protect.people for a in m.to + m.cc)):
                 out.add(m.thread_id)
         return out

@@ -22,7 +22,8 @@ Speed, accuracy and safety, checked against real protocols.
 - No-reply detection works on whole address tokens, in several languages.
 - `inbox-sweep eval` measures the rules against mail you already sorted (a
   label, the review page's decisions.json, or a hand-labelled sample), and
-  against a built-in labeled corpus: 0 false trash, 99.6% agreement.
+  against a built-in labeled corpus: 0 false trash, 97% agreement (the misses are
+  kept junk, by design).
 
 **Safer**
 - `apply` re-checks the live mailbox and skips threads starred, replied to or
@@ -46,6 +47,36 @@ Speed, accuracy and safety, checked against real protocols.
 - Clear errors for malformed config files instead of tracebacks.
 - Works on Windows: UTF-8 file handling throughout, console output that can't
   crash on unusual characters, Windows-aware lock checks.
+
+**Fixed after an independent review** (each has a regression test)
+- Gmail over IMAP: after Gmail renumbered All Mail, apply could move the wrong
+  message. Messages are now resolved by Gmail's permanent id when applying, and
+  every IMAP move is preceded by an identity check.
+- IMAP undo is exact: the Trash UID of every moved message is logged (COPYUID),
+  with a Message-ID search only as a fallback. Messages without a Message-ID, or
+  sharing one, now come back, and undo no longer rescans Trash for every batch.
+- Non-ASCII folder and label names (modified UTF-7) match `[protect] labels`,
+  in classify and in the live check; Gmail searches with non-ASCII terms work.
+- Protected labels cover nested folders ("Family/Photos", "Inbox/Family",
+  "INBOX.Family"); Outlook folders are read up to 16 levels deep.
+- A subject that looks like spam ("You won't believe…") no longer removes the
+  protection for a person on a personal address, and Gmail's Updates/Promotions
+  tabs no longer count as machine-sent for it.
+- An `index` that stopped early (or used `--query`/`--limit`) no longer lets
+  classify, plan or apply run on a partial index; what it read is kept.
+- `verify_plan` checks the folder, UID, UIDVALIDITY and Message-ID a backend will
+  act on, not just the message id.
+- IMAP: response lines over 1 MB (searches over ~125k messages), raw 8-bit
+  headers, a FETCH parser fooled by a label named like "UID 99", Courier-style
+  folders (`INBOX.Trash`), and dropped connections are all handled.
+- Outlook: batches of 4 to respect the 4-concurrent-requests-per-mailbox limit;
+  network errors are retried. Gmail: network errors are retried.
+- The undo log is fsync'd; undo records what it restored (re-applying works, a
+  second undo is a no-op); `undo --all` covers every run; the keep label isn't
+  redone when resuming; the log path is printed before anything moves.
+- `[protect] people` accepts `Name <address>` and rejects entries that would
+  protect nothing (like `@domain.com`).
+- Network, database and encoding errors print a clear message instead of a traceback.
 
 **Tested**
 - In-memory fakes of the Gmail API, IMAP and Microsoft Graph exercise paging,

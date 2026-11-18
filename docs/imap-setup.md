@@ -46,7 +46,18 @@ inbox-sweep prompts for it. It is never written to disk.
   messages it moved. Undo finds each message in Trash by its `Message-ID` and
   returns it to its original folder. Servers without labels skip the Keep label.
 - If a folder's `UIDVALIDITY` changes between `index` and `apply` (rare: the
-  server renumbered it), `apply` stops and asks you to re-index.
+  server renumbered it), `apply` stops and asks you to re-index. On Gmail,
+  messages are found by Gmail's permanent message id at apply time instead, so
+  renumbering doesn't matter.
+- **Every move is checked first.** Before moving, inbox-sweep reads each
+  message's Message-ID (or Gmail id) at its UID and skips anything that doesn't
+  match the index. When the server reports where each message landed in Trash
+  (`COPYUID`, part of UIDPLUS), that's logged too, so undo restores exactly
+  those messages, even ones without a Message-ID or with a duplicate one.
+- Folder names in any language work (IMAP's modified UTF-7 is decoded), and so do
+  servers that nest folders with "." (`INBOX.Family` is the label `INBOX/Family`,
+  protected by `labels = ["Family"]`).
+- A dropped connection is reopened automatically (up to 3 times per run).
 - **Speed.** Re-indexing fetches only flags for known mail and headers for new
   mail. There is no per-message quota, so Gmail over IMAP is the fastest way to
   index a very large Gmail inbox.

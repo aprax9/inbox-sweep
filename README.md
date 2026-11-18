@@ -91,8 +91,9 @@ inbox-sweep unsubscribe           # dry run of one-click unsubscribes; add --yes
 
 Setup guides: [Gmail](docs/gmail-api-setup.md) · [Outlook / Microsoft 365](docs/outlook-setup.md) · [IMAP](docs/imap-setup.md).
 
-Changed your mind? `inbox-sweep undo .inbox-sweep/trash-log-<id>.jsonl --yes`.
-Interrupted? Run the same `apply` again: it picks up where it stopped.
+Changed your mind? `inbox-sweep undo .inbox-sweep/trash-log-<id>.jsonl --yes`, or
+`inbox-sweep undo --all --yes` for every run. Interrupted? Run the same command
+again: `index` and `apply` pick up where they stopped.
 
 `init` takes flags too, for scripts: `inbox-sweep init --me you@gmail.com --protect "Okonkwo, mom@family.com" --domains employer.com`.
 
@@ -167,10 +168,10 @@ Protection comes first and beats everything else.
 | Always kept | |
 |---|---|
 | Threads you replied in, mail you sent | the whole conversation |
-| Starred or flagged mail, and labels, folders or categories you list | |
+| Starred or flagged mail, and labels, folders or categories you list | including folders nested inside them, in any language |
 | Protected people | addresses or names in `[protect] people` |
 | People you've written to | their personal mail; their newsletters can still go |
-| People on personal addresses | webmail senders that aren't bulk mail (unless it's obvious spam) |
+| People on personal addresses | webmail senders that aren't bulk mail, whatever the subject says |
 | People at protected domains | employers and schools: people, not mailing lists |
 | The last 30 days | your working set |
 
@@ -200,8 +201,11 @@ would trash. Clutter (junk that's kept) is only annoying.
   ~30 scenarios that tripped up earlier versions, such as a grandparent on
   webmail, a family member writing from a bank address, HR payslips, tax notices
   in English, German, French and Chinese, a school emailing from an odd domain, and
-  ATS rejections. Result: **0 false trash**, 1 clutter (a cold pitch younger than
-  the 1-year retention), 99.6% agreement. CI fails if false trash is ever above 0.
+  ATS rejections. Result: **0 false trash** and 97% agreement. The 7 clutter are
+  deliberate: 6 spam emails sent from webmail addresses (a grandparent's "You
+  won't believe this…" looks the same, so people on personal addresses are always
+  kept; trash such senders on the review page) and 1 cold pitch younger than its
+  1-year retention. CI fails if false trash is ever above 0.
 - **Your own mail:** if you've cleaned up by hand before (say, everything worth
   keeping carries a label), measure the rules against your own decisions:
 
@@ -223,11 +227,15 @@ would trash. Clutter (junk that's kept) is only annoying.
   protections recomputed from scratch), and against the **live mailbox**. A
   thread you starred, replied to or filed under a protected label after indexing
   is skipped.
-- **Only planned messages move.** Mail that lands in a planned thread after you
-  planned stays where it is.
-- **Crash-safe.** Each batch is logged before and after it's sent, so `undo`
-  can reverse a run that died halfway, and `apply` resumes where it stopped. Only
-  one run at a time can use a data folder.
+- **Only planned messages move, and only after the server confirms they're the
+  same messages.** Mail that lands in a planned thread later stays where it is.
+  Over IMAP, each message's identity (Gmail's message id, or its Message-ID) is
+  checked before it moves, so a renumbered folder can't redirect a move.
+- **Crash-safe.** Each batch is written to disk before and after it's sent, so
+  `undo` can reverse a run that died halfway, and `apply` resumes where it
+  stopped. An `index` that stops early keeps what it read but blocks planning
+  until it finishes. Only one run at a time can use a data folder.
+  `undo --all --yes` restores every run.
 - **No stale plans.** A plan built from an index more than 7 days old, or from
   before the last `index`, is refused (`--allow-stale` to override the first).
 - **One account per index.** A plan for one account won't apply to another.
@@ -236,10 +244,11 @@ would trash. Clutter (junk that's kept) is only annoying.
   Scopes are the minimum that can label and trash: Gmail `gmail.modify`, Outlook
   `Mail.ReadWrite`. Plaintext or unverified IMAP is only allowed to this machine
   (for local bridges).
-- **The Keep label is an audit trail, not a protection.** It shows what a run
-  kept. It doesn't stop a later run from trashing a receipt once it passes 3
-  years. To protect something forever, star it or file it under a label listed
-  in `[protect] labels`.
+- **In API mode the Keep label is an audit trail, not a protection.** It shows
+  what a run kept. It doesn't stop a later run from trashing a receipt once it
+  passes 3 years. To protect something forever, star it or file it under a label
+  listed in `[protect] labels`. (Browser mode works the other way round: it labels
+  everything worth keeping, then trashes whatever lacks the label.)
 - **Unsubscribing** is a single HTTPS POST to the sender's RFC 8058 one-click URL.
   No links in emails are opened, no email is sent, and private or local addresses
   are refused.
@@ -256,6 +265,8 @@ would trash. Clutter (junk that's kept) is only annoying.
   folder. The Gmail API restores exactly. On plain IMAP, restored messages get
   new ids, so the next `index` re-reads them (quickly).
 - Categories are English-first. Patterns live in `src/inbox_sweep/categories.py`.
+- `index --query` and `--limit` are for trying things out. Plans need a complete
+  index, because protections depend on seeing all your sent mail.
 
 ## Development
 

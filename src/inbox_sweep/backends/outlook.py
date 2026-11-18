@@ -27,7 +27,7 @@ from urllib.parse import quote, urlencode
 
 from inbox_sweep.backends.base import Backend, BackendError, LiveProtection, Pacer, Progress, chunked
 from inbox_sweep.headers import decode
-from inbox_sweep.model import INBOX, SENT, STARRED, TRASH, Message
+from inbox_sweep.model import INBOX, SENT, STARRED, TRASH, Message, label_matches
 
 GRAPH = "https://graph.microsoft.com/v1.0"
 SCOPES = ["Mail.ReadWrite", "User.Read"]
@@ -38,13 +38,17 @@ SELECT = ",".join([
 ])  # no body or bodyPreview: message content is never requested
 WELL_KNOWN = ["inbox", "sentitems", "deleteditems", "junkemail", "drafts", "outbox", "conversationhistory", "archive"]
 SKIP_WELL_KNOWN = {"deleteditems", "junkemail", "drafts", "outbox", "conversationhistory"}
-BATCH_SIZE = 20  # Graph's JSON batching limit
+# Graph accepts 20 requests per $batch but runs them in parallel, and Outlook allows
+# only 4 concurrent requests per mailbox (more get 429 MailboxConcurrency). Batches
+# of 4 run at full speed without being throttled.
+BATCH_SIZE = 4
+MAX_FOLDER_DEPTH = 16
 PAGE_SIZE = 1000  # Graph's maximum $top for messages
 # Outlook allows 10,000 requests per 10 minutes per app and mailbox, and batched
 # sub-requests count individually. Pace at 15/s to stay under it.
 REQUESTS_PER_SECOND = 15
 MAX_ATTEMPTS = 6
-RETRYABLE = {429, 500, 502, 503, 504}
+RETRYABLE = {0, 429, 500, 502, 503, 504}  # 0: the network failed before any HTTP status
 
 Transport = Callable[[str, str, dict, bytes | None], tuple[int, dict, dict]]
 
@@ -69,6 +73,8 @@ def urllib_transport(method: str, url: str, headers: dict, body: bytes | None) -
         except json.JSONDecodeError:
             data = {}
         return exc.code, {k.lower(): v for k, v in (exc.headers or {}).items()}, data
+    except (urllib.error.URLError, OSError, ValueError) as exc:  # network trouble, garbled reply: retried
+        return 0, {}, {"error": {"message": f"network error: {getattr(exc, 'reason', exc)}"}}
 
 
 def _retry_after(headers: dict, attempt: int) -> float:
@@ -271,7 +277,7 @@ class OutlookBackend(Backend):
         def walk(path: str, prefix: str, depth: int) -> None:
             for f in self.client.pages(path, {"$top": "250", "$select": "id,displayName,childFolderCount"}):
                 folders[f["id"]] = prefix + f.get("displayName", "")
-                if f.get("childFolderCount") and depth < 4:
+                if f.get("childFolderCount") and depth < MAX_FOLDER_DEPTH:
                     walk(f"/me/mailFolders/{quote(f['id'], safe='')}/childFolders", folders[f["id"]] + "/", depth + 1)
 
         walk("/me/mailFolders", "", 0)
@@ -319,11 +325,11 @@ class OutlookBackend(Backend):
             threads |= self._conversations("/me/messages", {"$filter": "flag/flagStatus eq 'flagged'"})
         if protect.sent and "sentitems" in self._well_known:
             threads |= self._conversations(f"/me/mailFolders/{quote(self._well_known['sentitems'], safe='')}/messages")
-        names = {v.lower(): k for k, v in (self._folders or {}).items()}
         for label in protect.labels:
-            folder_id = names.get(label.lower())
-            if folder_id:
-                threads |= self._conversations(f"/me/mailFolders/{quote(folder_id, safe='')}/messages")
+            # The folder itself, folders nested in it, and the same name under Inbox/...
+            for folder_id, path in (self._folders or {}).items():
+                if label_matches(path, label):
+                    threads |= self._conversations(f"/me/mailFolders/{quote(folder_id, safe='')}/messages")
             escaped = label.replace("'", "''")
             threads |= self._conversations("/me/messages", {"$filter": f"categories/any(c:c eq '{escaped}')"})
         for person in protect.people:

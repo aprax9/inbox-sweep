@@ -7,7 +7,9 @@ index -> classify -> review -> plan -> apply (-> undo). `doctor` checks setup,
 from __future__ import annotations
 
 import argparse
+import imaplib
 import json
+import sqlite3
 import sys
 import time
 import webbrowser
@@ -20,7 +22,7 @@ from inbox_sweep.categories import CATEGORY_HELP
 from inbox_sweep.classify import classify, summarize
 from inbox_sweep.config import CONFIG_TEMPLATE, Config, ConfigError, load_config
 from inbox_sweep.locking import LockError, exclusive
-from inbox_sweep.plan import PlanError, apply_plan, build_plan, load_plan, save_plan, undo, verify_plan
+from inbox_sweep.plan import PlanError, apply_plan, build_plan, load_plan, log_path_for, save_plan, undo, verify_plan
 from inbox_sweep.queries import build_queries
 from inbox_sweep.review import build_review_data, write_review
 from inbox_sweep.store import Store, StoreError
@@ -141,6 +143,7 @@ def cmd_index(args) -> int:
                                   "Use --fresh, or another [paths] data_dir.")
             if args.fresh:
                 store.clear_messages()
+            store.set_meta("index_complete", False)  # until this run finishes: nothing plans from half an index
             known = store.labels_by_id()
             say(f"Indexing {account} via {backend.name} ({'incremental' if known else 'full'}, headers only)...")
             progress = None if cfg.private else say  # backend progress can name folders
@@ -149,29 +152,34 @@ def cmd_index(args) -> int:
             new_buf: list = []
             relabel_buf: list = []
             removed: list = []
-            for event in backend.sync(known, query=args.query, limit=args.limit, progress=progress,
-                                      include_trash=args.include_trash):
-                kind = event[0]
-                if kind == "new":
-                    new_buf.append(event[1])
-                    if len(new_buf) >= 1000:
-                        counts["new"] += store.upsert_messages(new_buf)
-                        new_buf.clear()
-                elif kind == "labels":
-                    relabel_buf.append((event[1], event[2]))
-                    if len(relabel_buf) >= 5000:
-                        counts["labels"] += store.update_labels(relabel_buf)
-                        relabel_buf.clear()
-                elif kind == "removed":
-                    removed.append(event[1])
-            counts["new"] += store.upsert_messages(new_buf)
-            counts["labels"] += store.update_labels(relabel_buf)
+            try:
+                for event in backend.sync(known, query=args.query, limit=args.limit, progress=progress,
+                                          include_trash=args.include_trash):
+                    kind = event[0]
+                    if kind == "new":
+                        new_buf.append(event[1])
+                        if len(new_buf) >= 1000:
+                            counts["new"] += store.upsert_messages(new_buf)
+                            new_buf.clear()
+                    elif kind == "labels":
+                        relabel_buf.append((event[1], event[2]))
+                        if len(relabel_buf) >= 5000:
+                            counts["labels"] += store.update_labels(relabel_buf)
+                            relabel_buf.clear()
+                    elif kind == "removed":
+                        removed.append(event[1])
+            finally:
+                # Keep what was read even if the run stops: the next index continues from here.
+                # (Removals only come after a complete scan, so a stopped run never prunes.)
+                counts["new"] += store.upsert_messages(new_buf)
+                counts["labels"] += store.update_labels(relabel_buf)
             counts["removed"] += store.delete_messages(removed)
             elapsed = time.monotonic() - started
             store.set_meta("account", account)
             store.set_meta("backend", backend.name)
             store.set_meta("indexed_at", int(time.time()))
             store.set_meta("includes_trash", bool(args.include_trash))
+            store.set_meta("index_complete", args.query is None and not args.limit)
             if hasattr(backend, "uidvalidities"):
                 store.set_meta("uidvalidity", backend.uidvalidities())
             backend.close()
@@ -188,6 +196,7 @@ def cmd_classify(args) -> int:
         messages = store.messages()
         if not messages:
             raise PlanError("The index is empty. Run `inbox-sweep index` first.")
+        _require_complete_index(store)
         if args.overrides:
             try:
                 data = json.loads(Path(args.overrides).read_text(encoding="utf-8"))
@@ -233,6 +242,15 @@ def cmd_review(args) -> int:
     return 0
 
 
+def _require_complete_index(store: Store) -> None:
+    complete = store.get_meta("index_complete")
+    if complete is None:  # indexes from before 0.3 only wrote indexed_at, and only at the end
+        complete = bool(store.get_meta("indexed_at"))
+    if not complete:
+        raise PlanError("The index is incomplete: the last `inbox-sweep index` stopped early or used "
+                        "--query/--limit. Run `inbox-sweep index` (it continues where it stopped).")
+
+
 def _require_fresh_decisions(store: Store) -> None:
     if store.get_meta("indexed_at") != store.get_meta("classified_index_at"):
         raise PlanError("The index changed since you last classified. Run `inbox-sweep classify` again.")
@@ -241,6 +259,7 @@ def _require_fresh_decisions(store: Store) -> None:
 def cmd_plan(args) -> int:
     cfg = _config(args)
     with exclusive(cfg.data_path, "plan"), _store(cfg) as store:
+        _require_complete_index(store)
         messages, decisions = store.messages(), _decisions(store)
         _require_fresh_decisions(store)
         plan = build_plan(messages, decisions, cfg, account=store.get_meta("account", ""),
@@ -264,9 +283,11 @@ def cmd_apply(args) -> int:
     cfg = _config(args)
     plan = load_plan(args.plan)
     with exclusive(cfg.data_path, "apply"), _store(cfg) as store:
+        _require_complete_index(store)
         messages, decisions = store.messages(), _decisions(store)
-        if plan.get("indexed_at") and plan.get("indexed_at") != store.get_meta("indexed_at"):
-            raise PlanError("The index changed since this plan was made. Run `inbox-sweep classify` and `plan` again.")
+        if plan.get("indexed_at") != store.get_meta("indexed_at"):
+            raise PlanError("This plan wasn't made from the current index (it changed since, or the plan is "
+                            "from an older version). Run `inbox-sweep classify` and `plan` again.")
         problems = verify_plan(plan, messages, decisions, cfg)
         if problems:
             say("Plan failed the safety check; nothing was changed:")
@@ -286,6 +307,8 @@ def cmd_apply(args) -> int:
             print("\nDry run. Nothing changed. Re-run with --yes to apply.")
             return 0
         backend = get_backend(cfg, plan.get("backend") or None)
+        print(f"Undo log: {log_path_for(plan, cfg)}  (if this stops early: run it again, or `undo` this log)",
+              flush=True)
         started = time.monotonic()
         result = apply_plan(plan, backend, cfg, messages, label_keep=not args.no_label,
                             live_check=not args.no_live_check, allow_stale=args.allow_stale,
@@ -302,12 +325,20 @@ def cmd_apply(args) -> int:
 
 def cmd_undo(args) -> int:
     cfg = _config(args)
+    if args.all:
+        logs = sorted(cfg.data_path.glob("trash-log-*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if not logs:
+            raise PlanError(f"No apply logs in {cfg.data_path}")
+    elif args.log:
+        logs = [Path(args.log)]
+    else:
+        raise ConfigError("Name a log (inbox-sweep undo .inbox-sweep/trash-log-<id>.jsonl) or use --all.")
     if not args.yes:
-        print(f"This restores every thread listed in {args.log}. Re-run with --yes.")
+        print(f"This restores every thread listed in {', '.join(str(p) for p in logs)}. Re-run with --yes.")
         return 0
     with exclusive(cfg.data_path, "undo"):
         backend = get_backend(cfg)
-        result = undo(args.log, backend, cfg, progress=say)
+        result = undo(logs, backend, cfg, progress=say)
         backend.close()
     print(f"Restored {result['restored']:,} of {result['total']:,} threads.")
     return 0 if result["restored"] == result["total"] else 1
@@ -491,7 +522,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_apply)
 
     s = sub.add_parser("undo", help="restore threads from an apply log")
-    s.add_argument("log")
+    s.add_argument("log", nargs="?")
+    s.add_argument("--all", action="store_true", help="every apply log in the data folder")
     s.add_argument("--yes", action="store_true")
     s.set_defaults(func=cmd_undo)
 
@@ -536,6 +568,10 @@ def main(argv: list[str] | None = None) -> int:
         return args.func(args)
     except (ConfigError, BackendError, PlanError, LockError, StoreError, RuntimeError) as exc:
         say(f"error: {exc}")
+        return 2
+    except (OSError, imaplib.IMAP4.error, sqlite3.Error, UnicodeError) as exc:
+        say(f"error: {type(exc).__name__}: {exc}")
+        say("Nothing is lost: `index` and `apply` pick up where they stopped when you run them again.")
         return 2
     except KeyboardInterrupt:
         say("interrupted; `apply` resumes where it stopped")

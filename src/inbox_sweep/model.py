@@ -30,6 +30,20 @@ SYSTEM_LABELS = {
 }
 
 
+def label_matches(label: str, wanted: str) -> bool:
+    """True if `label` is the label `wanted`, a label nested inside it, or the same
+    folder under a parent folder, ignoring case.
+
+    "Family", "Family/Photos" and "Inbox/Family" all match "Family" (Outlook puts
+    folders under "Inbox/...", Courier-style IMAP under "INBOX.").
+    """
+    have = [p.strip().casefold() for p in label.split("/") if p.strip()]
+    want = [p.strip().casefold() for p in wanted.split("/") if p.strip()]
+    if not want or len(want) > len(have):
+        return False
+    return any(have[i:i + len(want)] == want for i in range(len(have) - len(want) + 1))
+
+
 @dataclass
 class Message:
     id: str
@@ -60,6 +74,10 @@ class Message:
     def has_label(self, name: str) -> bool:
         target = name.lower()
         return any(label.lower() == target for label in self.labels)
+
+    def in_label(self, wanted: str) -> bool:
+        """In `wanted` or a label/folder nested under it (see label_matches)."""
+        return any(label_matches(label, wanted) for label in self.labels)
 
     def to_row(self) -> dict:
         row = asdict(self)

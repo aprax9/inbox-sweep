@@ -29,7 +29,8 @@ def test_plan_apply_undo_roundtrip(env):
     messages = store.messages()
     decisions = classify(messages, cfg)
     store.save_decisions(decisions)
-    plan = build_plan(messages, decisions, cfg, account="you@example.com", backend="demo")
+    plan = build_plan(messages, decisions, cfg, account="you@example.com", backend="demo",
+                      indexed_at=int(__import__("time").time()))
     assert plan["summary"]["trash_threads"] > 100
     assert verify_plan(plan, messages, decisions, cfg) == []
 

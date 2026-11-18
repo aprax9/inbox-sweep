@@ -204,3 +204,43 @@ def test_label_messages_creates_label_and_batches():
     keep_id = next(l["id"] for l in svc.labels_.values() if l["name"] == "Keep")
     assert all(keep_id in svc.msgs[f"m{i}"]["labelIds"] for i in range(10))
     assert svc.calls["messages.batchModify"] == 1
+
+
+
+def test_live_check_finds_nested_and_non_ascii_labels_by_id():
+    msgs = [gmail_message("a", "ta", "x@shop.example", "deal", T0, labels=["INBOX", "Label_1"]),
+            gmail_message("b", "tb", "x@shop.example", "deal", T0, labels=["INBOX", "Label_2"]),
+            gmail_message("c", "tc", "x@shop.example", "deal", T0, labels=["INBOX"])]
+    svc = FakeGmail(msgs, labels=[{"id": "Label_1", "name": "Família/Fotos", "type": "user"},
+                                  {"id": "Label_2", "name": "Work", "type": "user"}])
+    gm, _ = backend(svc)
+    assert gm.protected_thread_ids(LiveProtection(labels=["família"], starred=False, sent=False)) == {"ta"}
+
+
+def test_network_errors_are_retried_then_reported():
+    import socket
+
+    from inbox_sweep.backends.base import BackendError
+
+    svc = FakeGmail(mailbox(2))
+    gm, clock = backend(svc)
+    real = svc.getProfile
+    attempts = {"n": 0}
+
+    class Flaky:
+        def execute(self):
+            attempts["n"] += 1
+            if attempts["n"] < 3:
+                raise socket.timeout("timed out")
+            return real(userId="me").execute()
+
+    svc.getProfile = lambda userId: Flaky()
+    assert gm.account() == "me@gmail.com" and attempts["n"] == 3
+
+    class Down:
+        def execute(self):
+            raise ConnectionResetError("reset")
+
+    svc.getProfile = lambda userId: Down()
+    with pytest.raises(BackendError, match="picks up where it stopped"):
+        gm.account()

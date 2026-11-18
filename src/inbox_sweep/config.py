@@ -199,6 +199,27 @@ def _list(section: dict, key: str) -> list[str]:
     return [v.strip() for v in value if v.strip()]
 
 
+def _people(entries: list[str]) -> list[str]:
+    """Names stay names. Anything with an @ must be one address ("Mom <mom@x.com>" is fine)."""
+    from email.utils import parseaddr
+
+    out = []
+    for entry in entries:
+        if "@" not in entry:
+            out.append(entry)
+            continue
+        if entry.lstrip().startswith("@"):
+            raise ConfigError(f"[protect] people has '{entry}'. For a whole domain use [protect] domains "
+                              "(it protects the people there), or list each address.")
+        _, addr = parseaddr(entry)
+        local, _, domain = addr.rpartition("@")
+        if not local or "." not in domain or any(c.isspace() for c in addr):
+            raise ConfigError(f"[protect] people: can't read '{entry}' as an email address. "
+                              "Use one address per entry, e.g. \"mom@example.com\".")
+        out.append(addr.lower())
+    return out
+
+
 def _bool(section: dict, key: str, default: bool) -> bool:
     value = section.get(key, default)
     if not isinstance(value, bool):
@@ -268,7 +289,7 @@ def _read(cfg: Config, data: dict) -> None:
     cfg.private = _bool(data.get("privacy", {}), "private", False)
 
     protect = data.get("protect", {})
-    cfg.protect_people = _list(protect, "people")
+    cfg.protect_people = _people(_list(protect, "people"))
     cfg.protect_domains = _list(protect, "domains")
     cfg.protect_keywords = _list(protect, "keywords")
     cfg.protect_labels = _list(protect, "labels")

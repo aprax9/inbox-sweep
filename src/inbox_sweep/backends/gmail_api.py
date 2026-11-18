@@ -28,7 +28,7 @@ from typing import Callable, Iterator
 
 from inbox_sweep.backends.base import Backend, BackendError, LiveProtection, Pacer, Progress, chunked
 from inbox_sweep.headers import WANTED_HEADERS, decode, parse_address_list, parse_date, parse_from
-from inbox_sweep.model import CHAT, DRAFT, SPAM, TRASH, Message
+from inbox_sweep.model import CHAT, DRAFT, SPAM, TRASH, Message, label_matches
 
 SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
 
@@ -81,6 +81,22 @@ def message_from_gmail(data: dict, label_names: dict[str, str]) -> Message:
 
 class _FastPathRejected(Exception):
     """batchModify was accepted but the messages did not move."""
+
+
+def _transport_errors() -> tuple[type[BaseException], ...]:
+    """Network failures below HTTP (dropped Wi-Fi, DNS, TLS resets): always worth a retry."""
+    errors: list[type[BaseException]] = [OSError]
+    try:
+        import httplib2
+        errors.append(httplib2.HttpLib2Error)
+    except ImportError:  # pragma: no cover
+        pass
+    try:
+        from google.auth.exceptions import TransportError
+        errors.append(TransportError)
+    except ImportError:  # pragma: no cover
+        pass
+    return tuple(errors)
 
 
 def _status(exc: Exception) -> int | None:
@@ -176,6 +192,7 @@ class GmailBackend(Backend):
     # -- request helpers --------------------------------------------------------------
     def _execute(self, request, units: int):
         from googleapiclient.errors import HttpError
+        transport = _transport_errors()
         for attempt in range(MAX_ATTEMPTS):
             self.pacer.spend(units)
             try:
@@ -183,7 +200,11 @@ class GmailBackend(Backend):
             except HttpError as exc:
                 if not _retryable(exc) or attempt == MAX_ATTEMPTS - 1:
                     raise
-                self.sleep(min(60, 2 ** attempt))
+            except transport as exc:
+                if attempt == MAX_ATTEMPTS - 1:
+                    raise BackendError(f"Network problem talking to Gmail ({exc}). Run the same command "
+                                       "again: it picks up where it stopped.") from exc
+            self.sleep(min(60, 2 ** attempt))
         raise BackendError("unreachable")
 
     def _batch(self, make_request, keys: list[str], units_each: int, size: int) -> tuple[dict, list[str]]:
@@ -193,6 +214,7 @@ class GmailBackend(Backend):
         """
         from googleapiclient.errors import HttpError
 
+        transport = _transport_errors()
         results: dict[str, object] = {}
         failed: list[str] = []  # non-retryable, e.g. 404 for a message deleted meanwhile
         pending = list(keys)
@@ -217,6 +239,8 @@ class GmailBackend(Backend):
                 except HttpError as exc:  # the whole batch was rejected
                     if not _retryable(exc):
                         raise
+                    retry.extend(k for k in group if k not in results and k not in retry)
+                except transport:  # the connection dropped: retry whatever didn't come back
                     retry.extend(k for k in group if k not in results and k not in retry)
             pending = retry
             if not pending:
@@ -453,6 +477,12 @@ class GmailBackend(Backend):
 
     def protected_thread_ids(self, protect: LiveProtection) -> set[str] | None:
         threads: set[str] = set()
-        for query in protection_queries(protect):
+        plain = LiveProtection(me=protect.me, people=protect.people, labels=(),
+                               starred=protect.starred, sent=protect.sent)
+        for query in protection_queries(plain):
             threads.update(m["threadId"] for m in self._list(query))
+        # Labels by id rather than by search syntax: exact, includes nested labels, any language.
+        for lid, name in self._label_names().items():
+            if any(label_matches(name, wanted) for wanted in protect.labels):
+                threads.update(m["threadId"] for m in self._list(label_id=lid))
         return threads

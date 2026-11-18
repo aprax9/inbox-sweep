@@ -100,7 +100,8 @@ inbox-sweep --private unsubscribe                  # dry run; --yes only after a
 ```
 
 - Interrupted? Re-run the same `apply`: it resumes from its log.
-- Regret? `inbox-sweep --private undo .inbox-sweep/trash-log-*.jsonl --yes`.
+- Regret? `inbox-sweep --private undo --all --yes` restores every run (or name
+  one log: `undo .inbox-sweep/trash-log-<id>.jsonl --yes`).
 - `apply` re-checks the live mailbox: anything they star or reply to after
   indexing is skipped. Tell them: "star anything you want to be sure of."
 - `plan`/`apply` refuse decisions or plans older than the last `index`. Re-run

@@ -208,6 +208,42 @@ def test_batches_are_paced_per_sub_request():
     entries = [{"thread_id": f"c-conv-M{i:03d}", "messages": [{"id": f"M{i:03d}", "folder": "F-INBOX"}]}
                for i in range(100)]
     assert len(backend.trash(entries)) == 100
-    # 100 moves in 5 batches of 20, each counted as 20 requests: Graph's 10,000 per 10 minutes is per
-    # sub-request. The first batch goes at once, the rest wait for budget.
-    assert clock["t"] >= (100 - 20) / 15 - 1e-9
+    # 100 moves in batches of 4 (Outlook runs at most 4 requests per mailbox at once), each
+    # counted as 4 requests: Graph's 10,000 per 10 minutes is per sub-request.
+    batches = [c for c in fake.calls if c[1].endswith("/$batch")]
+    assert len(batches) == 25
+    assert clock["t"] >= (100 - 4) / 15 - 1e-9
+
+
+def test_network_failures_are_retried():
+    fake = FakeGraph([graph_message("A")])
+    drops = {"left": 2}
+
+    def flaky(method, url, headers, body):
+        if drops["left"]:
+            drops["left"] -= 1
+            return 0, {}, {"error": {"message": "network error: timed out"}}
+        return fake(method, url, headers, body)
+
+    backend = OutlookBackend(client=GraphClient(lambda: "TOKEN", transport=flaky, sleep=lambda s: None))
+    assert backend.account() == "me@example.com"
+
+
+def test_urllib_transport_turns_network_errors_into_a_retryable_status(monkeypatch):
+    import urllib.error
+    import urllib.request
+    from inbox_sweep.backends.outlook import urllib_transport
+
+    def down(*a, **kw):
+        raise urllib.error.URLError("Temporary failure in name resolution")
+
+    monkeypatch.setattr(urllib.request, "urlopen", down)
+    status, _, body = urllib_transport("GET", "https://graph.microsoft.com/v1.0/me", {}, None)
+    assert status == 0 and "network error" in body["error"]["message"]
+
+
+def test_nested_and_inbox_folders_count_as_protected_labels():
+    from inbox_sweep.backends.base import LiveProtection
+    fake = FakeGraph([graph_message("t2015", folder="F-TAX-2015"), graph_message("promo")])
+    threads = backend_for(fake).protected_thread_ids(LiveProtection(labels=["Taxes"], starred=False, sent=False))
+    assert threads == {"c-conv-t2015"}  # "Taxes/2015" sits inside the protected "Taxes"

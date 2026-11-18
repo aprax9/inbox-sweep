@@ -228,6 +228,9 @@ class FakeIMAP:
         self.caps = list(caps) + (["X-GM-EXT-1"] if gmail else [])
         self.selected: str | None = None
         self.commands: Counter = Counter()
+        self.literal = None          # imaplib's literal attribute
+        self.copyuid = True          # report COPYUID after MOVE/COPY, like UIDPLUS servers
+        self._copyuid_data: list = []
 
     def capability(self):
         return "OK", [" ".join(self.caps).encode()]
@@ -238,11 +241,13 @@ class FakeIMAP:
             raise imaplib.IMAP4.error("AUTHENTICATIONFAILED")
         return "OK", [b"ok"]
 
+    delimiter = "/"
+
     def list(self):
         lines = []
         for name, f in self.folders.items():
             flags = " ".join(["\\HasNoChildren"] + f["flags"])
-            lines.append(('(' + flags + ') "/" "' + name + '"').encode())
+            lines.append(('(' + flags + ') "' + self.delimiter + '" "' + name + '"').encode())
         return "OK", lines
 
     def select(self, mailbox, readonly=False):
@@ -255,6 +260,9 @@ class FakeIMAP:
     def response(self, code):
         if code == "UIDVALIDITY" and self.selected:
             return code, [str(self.folders[self.selected]["uidvalidity"]).encode()]
+        if code == "COPYUID":
+            data, self._copyuid_data = self._copyuid_data or [None], []
+            return code, data
         return code, [None]
 
     def logout(self):
@@ -313,7 +321,12 @@ class FakeIMAP:
         folder = self.folders[self.selected]
         msgs = folder["msgs"]
         if cmd == "SEARCH":
-            hits = [u for u, m in sorted(msgs.items()) if self._match(m, list(args))]
+            args = list(args)
+            if args[:1] == ["CHARSET"]:  # UTF-8 literal search: the value arrives in self.literal
+                assert args[1] == "UTF-8" and self.literal is not None
+                args = args[2:] + [self.literal.decode("utf-8")]
+                self.literal = None
+            hits = [u for u, m in sorted(msgs.items()) if self._match(m, args)]
             return "OK", [" ".join(map(str, hits)).encode()]
         if cmd == "FETCH":
             uidset, items = args
@@ -335,17 +348,26 @@ class FakeIMAP:
         if cmd in ("MOVE", "COPY"):
             uidset, dest = args
             dest = dest.strip('"')
+            if dest not in self.folders:
+                return "NO", [b"[TRYCREATE] no such mailbox"]
             target = self.folders[dest]
+            src_uids, dst_uids = [], []
             for u in self._uids(uidset):
                 m = dict(msgs[u])
+                m["flags"] = list(m.get("flags", []))
                 if self.gmail and dest.endswith("Trash"):
                     m["labels"] = [l for l in m.get("labels", []) if l != "\\Inbox"]
                 if self.gmail and dest == "INBOX":
                     m["labels"] = sorted(set(m.get("labels", [])) | {"\\Inbox"})
                 target["msgs"][target["next"]] = m
+                src_uids.append(u)
+                dst_uids.append(target["next"])
                 target["next"] += 1
                 if cmd == "MOVE":
                     del msgs[u]
+            if self.copyuid and src_uids:
+                self._copyuid_data.append(f"{target['uidvalidity']} {','.join(map(str, src_uids))} "
+                                          f"{','.join(map(str, dst_uids))}".encode())
             return "OK", [b"done"]
         if cmd == "STORE":
             uidset, op, value = args
